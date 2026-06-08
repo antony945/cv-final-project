@@ -12,7 +12,7 @@ wheels/
 .env
 
 # Datasets
-datasets/nyu/train-**
+datasets/nyu/**.tar
 
 # Outputs
 outputs/xxs_**
