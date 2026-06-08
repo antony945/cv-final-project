@@ -33,8 +33,11 @@ Edit `.env` and set:
 |----------|-------------|
 | `HF_TOKEN` | HuggingFace token (optional, avoids rate limits) |
 | `HF_OFFLINE` | `true` to use local cache only, `false` to stream from HF |
+| `NYU_DATASET_PATH` | Path to local NYU tar archives (e.g. `datasets/nyu`). If set, loads from local `.tar/.h5` files instead of HuggingFace. Relative paths resolve from project root. |
 
-On first run, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
+On first run with HuggingFace, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
+
+Alternatively, place the NYU Depth V2 `.tar` shards (`train-000000.tar`, `train-000001.tar`, ...) in `datasets/nyu/` and set `NYU_DATASET_PATH=datasets/nyu` to skip HuggingFace entirely.
 
 ## Training
 
