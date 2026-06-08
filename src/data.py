@@ -13,6 +13,7 @@ import abc
 import glob
 import io
 import logging
+import random
 import tarfile
 
 import h5py
@@ -48,25 +49,86 @@ def _get_pretrain_transforms(resolution: int) -> v2.Compose:
     ])
 
 
-def _get_depth_transforms(resolution: int):
-    """Synchronized transforms for RGB+depth pairs (fine-tuning).
+def _get_depth_transforms(resolution: tuple[int, int] | int, train: bool = True):
+    """Get transforms for depth fine-tuning.
 
-    Returns (rgb_transform, depth_transform) that apply consistent spatial ops.
-    Color jitter is only applied to RGB; depth gets resize + normalize only.
+    In validation mode: just resize + normalize.
+    In training mode: full METER augmentation is applied in __getitem__ (numpy-level),
+    so transforms here only handle resize + ToTensor + normalize.
+
+    Args:
+        resolution: (H, W) tuple or single int for square crop.
+        train: whether to include training augmentations (handled externally).
     """
+    if isinstance(resolution, int):
+        resolution = (resolution, resolution)
+
     rgb_transform = v2.Compose([
-        v2.Resize((resolution, resolution)),
-        v2.RandomHorizontalFlip(),
+        v2.Resize(resolution),
         v2.ToImage(),
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     depth_transform = v2.Compose([
-        v2.Resize((resolution, resolution)),
+        v2.Resize(resolution),
         v2.ToImage(),
         v2.ToDtype(torch.float32, scale=False),
     ])
     return rgb_transform, depth_transform
+
+
+def _meter_augmentation(img: np.ndarray, depth: np.ndarray, p: float = 0.5,
+                        depth_shift_range: int = 10
+                        ) -> tuple[np.ndarray, np.ndarray]:
+    """Full METER data augmentation policy (numpy-level, before ToTensor).
+
+    Applied to both RGB image (H,W,3 uint8/float) and depth map (H,W float).
+    All transforms applied with probability p.
+
+    Includes:
+    - Vertical flip
+    - Horizontal mirror
+    - Channel swap (RGB only)
+    - Shifting strategy: gamma/brightness/color on RGB + depth shift
+    """
+    # Ensure float for image processing
+    img = img.astype(np.float64) / 255.0 if img.dtype == np.uint8 else img.astype(np.float64)
+
+    # Random vertical flip
+    if random.random() < p:
+        img = img[::-1, :, :].copy()
+        depth = depth[::-1, :].copy()
+
+    # Random horizontal mirror
+    if random.random() < p:
+        img = img[:, ::-1, :].copy()
+        depth = depth[:, ::-1].copy()
+
+    # Channel swap (RGB only)
+    if random.random() < p:
+        perm = list(np.random.permutation(3))
+        img = img[:, :, perm]
+
+    # Shifting strategy
+    if random.random() < p:
+        # Gamma + brightness augmentation
+        gamma = random.uniform(0.9, 1.1)
+        brightness = random.uniform(0.9, 1.1)
+        img = np.clip(img, 0, None)  # Ensure non-negative before power
+        img = brightness * (img ** gamma)
+
+        # Color augmentation (per-channel scaling)
+        colors = np.random.uniform(0.9, 1.1, size=3)
+        img = img * colors[np.newaxis, np.newaxis, :]
+        img = np.clip(img, 0, 1.0)
+
+        # Depth shift (±10cm = ±0.1m for meters unit)
+        shift = random.uniform(-depth_shift_range, depth_shift_range) / 100.0
+        depth = depth + shift
+
+    # Convert back to uint8 for PIL
+    img = (np.clip(img, 0, 1.0) * 255).astype(np.uint8)
+    return img, depth
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -109,11 +171,15 @@ class BaseDepthDataset(Dataset, abc.ABC):
     Subclasses implement _load_samples() -> list[tuple[PIL.Image, np.ndarray]].
     """
 
-    def __init__(self, n_samples: int, resolution: int = 128):
+    def __init__(self, n_samples: int, resolution: tuple[int, int] | int = 128,
+                 train: bool = True, augment: bool = True):
         self.resolution = resolution
-        self.rgb_transform, self.depth_transform = _get_depth_transforms(resolution)
+        self.train = train
+        self.augment = augment and train
+        self.rgb_transform, self.depth_transform = _get_depth_transforms(
+            resolution, train=train)
         self._samples = self._load_samples(n_samples)
-        log.info(f"{len(self._samples)} depth samples loaded.")
+        log.info(f"{len(self._samples)} depth samples loaded ({'train' if train else 'val'}).")
 
     @abc.abstractmethod
     def _load_samples(self, n_samples: int) -> list:
@@ -126,11 +192,20 @@ class BaseDepthDataset(Dataset, abc.ABC):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         img, depth = self._samples[idx]
 
-        # Apply transforms
-        rgb = self.rgb_transform(img)
+        # Convert PIL to numpy for augmentation
+        img_np = np.array(img)  # (H, W, 3) uint8
+        depth_np = depth.copy()
 
-        # Depth: convert to PIL for torchvision transforms, then to tensor
-        depth_pil = Image.fromarray(depth.astype(np.float32), mode="F")
+        # Apply METER augmentation (numpy-level, before tensor conversion)
+        if self.augment:
+            img_np, depth_np = _meter_augmentation(img_np, depth_np)
+
+        # Convert back to PIL for torchvision transforms
+        img_pil = Image.fromarray(img_np.astype(np.uint8), mode="RGB")
+        rgb = self.rgb_transform(img_pil)
+
+        # Depth: convert to PIL for resize, then to tensor
+        depth_pil = Image.fromarray(depth_np.astype(np.float32), mode="F")
         depth_tensor = self.depth_transform(depth_pil)  # (1, H, W)
         return rgb, depth_tensor
 
@@ -140,7 +215,8 @@ class BaseDepthDataset(Dataset, abc.ABC):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False):
+def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False,
+                    split: str = "train"):
     """Load NYU samples from local tar archives containing .h5 files.
 
     Each .h5 has keys: "rgb" (3, H, W) uint8 and "depth" (H, W) float.
@@ -153,10 +229,11 @@ def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False):
     if not resolved.is_absolute():
         resolved = ROOT / resolved
 
-    tar_files = sorted(glob.glob(str(resolved / "train-*.tar")))
+    pattern = f"{split}-*.tar"
+    tar_files = sorted(glob.glob(str(resolved / pattern)))
     if not tar_files:
         raise FileNotFoundError(
-            f"No train-*.tar files found in {resolved}. "
+            f"No {pattern} files found in {resolved}. "
             f"Expected NYU Depth V2 tar archives with .h5 samples inside."
         )
     log.info(f"Loading NYU locally from {len(tar_files)} tar shards in {resolved}...")
@@ -197,21 +274,23 @@ def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False):
 
 
 def _load_nyu_hf(n_samples: int, include_depth: bool = False,
-                 token: str | None = HF_TOKEN, offline: bool = HF_OFFLINE):
+                 token: str | None = HF_TOKEN, offline: bool = HF_OFFLINE,
+                 split: str = "train"):
     """Load NYU samples from HuggingFace (streaming/cached)."""
     import os
     from datasets import load_dataset
 
     if offline:
         os.environ["HF_DATASETS_OFFLINE"] = "1"
-        log.info(f"Loading {n_samples} NYU samples from local cache (offline)...")
+        log.info(f"Loading {n_samples} NYU {split} samples from local cache (offline)...")
     else:
         os.environ.pop("HF_DATASETS_OFFLINE", None)
-        log.info(f"Loading {n_samples} NYU samples from HuggingFace (streaming)...")
+        log.info(f"Loading {n_samples} NYU {split} samples from HuggingFace (streaming)...")
 
+    hf_split = "validation" if split == "val" else split
     stream = load_dataset(
         "sayakpaul/nyu_depth_v2",
-        split="train",
+        split=hf_split,
         streaming=True,
         trust_remote_code=True,
         token=token,
@@ -255,13 +334,21 @@ class NYUDepthDataset(BaseDepthDataset):
     """NYU Depth V2 — RGB + depth pairs for monocular depth fine-tuning.
 
     Loads from local tar/h5 (if NYU_DATASET_PATH set) or HuggingFace streaming.
+    Supports train/val splits and METER augmentation policy.
     """
+
+    def __init__(self, n_samples: int, resolution: tuple[int, int] | int = 128,
+                 train: bool = True, augment: bool = True, split: str = "train"):
+        self._split = split
+        super().__init__(n_samples=n_samples, resolution=resolution,
+                         train=train, augment=augment)
 
     def _load_samples(self, n_samples: int) -> list:
         nyu_path = get_nyu_dataset_path()
         if nyu_path:
-            return _load_nyu_local(nyu_path, n_samples, include_depth=True)
-        return _load_nyu_hf(n_samples, include_depth=True)
+            return _load_nyu_local(nyu_path, n_samples, include_depth=True,
+                                   split=self._split)
+        return _load_nyu_hf(n_samples, include_depth=True, split=self._split)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -342,14 +429,14 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
 
 
 def get_depth_loader(cfg: DictConfig, device: str | None = None,
-                     shuffle: bool = True) -> DataLoader:
+                     split: str = "train") -> DataLoader:
     """Build the depth fine-tuning DataLoader from config.
 
     Args:
         cfg: Hydra DictConfig (needs cfg.data.dataset, cfg.data.n_samples,
-             cfg.resolution, cfg.bs).
+             cfg.finetune.resolution, cfg.bs or cfg.finetune.bs).
         device: Override device for pin_memory decision.
-        shuffle: Whether to shuffle (True for train, False for val).
+        split: "train" or "val".
     """
     dev = device or DEVICE
     dataset_name = cfg.data.dataset
@@ -359,14 +446,23 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
         raise ValueError(f"Unknown depth dataset: {dataset_name}. "
                          f"Available: {list(_DEPTH_DATASETS.keys())}")
 
+    # Resolution: prefer finetune.resolution, fallback to cfg.resolution
+    resolution = cfg.get("finetune", {}).get("resolution", cfg.get("resolution", 128))
+    if isinstance(resolution, (list, tuple)):
+        resolution = tuple(resolution)
+
+    batch_size = cfg.get("finetune", {}).get("bs", cfg.get("bs", 8))
+    is_train = (split == "train")
+
     ds_cls = _DEPTH_DATASETS[dataset_name]
-    ds = ds_cls(n_samples=n_samples, resolution=cfg.resolution)
+    ds = ds_cls(n_samples=n_samples, resolution=resolution,
+                train=is_train, augment=is_train, split=split)
 
     return DataLoader(
         ds,
-        batch_size=cfg.bs,
-        shuffle=shuffle,
-        drop_last=True,
+        batch_size=batch_size,
+        shuffle=is_train,
+        drop_last=is_train,
         num_workers=0,
         pin_memory=(dev == "cuda"),
     )

@@ -165,6 +165,9 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             log.info(f"Epoch {epoch:>3} | lejepa={ep_lejepa:.4f} "
                      f"sigreg={ep_sig:.4f} inv={ep_inv:.4f}")
 
+            # ── Live loss curves (overwritten each epoch) ─────────────
+            _plot_loss_curves(history, variant)
+
             # ── Checkpoint ────────────────────────────────────────────
             if epoch % cfg.ckpt_every == 0:
                 ckpt_dir = Path("checkpoints")
@@ -225,10 +228,6 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
         import wandb
         wandb.finish()
 
-    # ── Plot loss curves (if any epochs completed) ────────────────────
-    if history["lejepa"]:
-        _plot_loss_curves(history, variant)
-
     return history
 
 
@@ -262,4 +261,250 @@ def _plot_loss_curves(history: dict, variant: str):
     out_path = plots_dir / f"loss_curves_{variant}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     log.info(f"Loss curves saved: {out_path}")
+    plt.close(fig)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  METER Fine-tuning (Depth Estimation)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def finetune_depth(cfg: DictConfig) -> dict:
+    """Run METER depth estimation fine-tuning.
+
+    Trains encoder + decoder for monocular depth prediction using the
+    Balanced Loss Function (BLF) from the METER paper.
+
+    Args:
+        cfg: Hydra DictConfig with all training hyperparameters.
+    Returns:
+        dict with training history and best metrics.
+    """
+    from src.model import METERModel
+    from src.loss import BalancedDepthLoss, compute_depth_metrics
+    from src.data import get_depth_loader
+
+    variant = cfg.variant
+    device = _resolve_device(cfg)
+    ft_cfg = cfg.finetune
+    resolution = tuple(ft_cfg.resolution)  # (H, W)
+    epochs = ft_cfg.epochs
+    bs = ft_cfg.get("bs", cfg.get("bs", 8))
+
+    log.info(f"METER Fine-tuning: MobileViT-{variant.upper()}")
+    log.info(f"Resolution: {resolution} | Epochs: {epochs} | BS: {bs} | Device: {device}")
+
+    # ── Model ─────────────────────────────────────────────────────────
+    model = METERModel(variant=variant, resolution=resolution).to(device)
+
+    # Load pretrained encoder if specified
+    pretrained = ft_cfg.get("pretrained_encoder")
+    if pretrained:
+        from src.config import ROOT
+        ckpt_path = Path(pretrained)
+        if not ckpt_path.is_absolute():
+            ckpt_path = ROOT / ckpt_path
+        model.load_pretrained_encoder(str(ckpt_path))
+        log.info(f"Loaded pretrained encoder from: {ckpt_path}")
+    else:
+        log.info("Training from scratch (no pretrained encoder).")
+
+    params = sum(p.numel() for p in model.parameters())
+    log.info(f"Total parameters: {params:,} ({params/1e6:.2f}M)")
+
+    # ── Encoder freezing ──────────────────────────────────────────────
+    freeze_epochs = ft_cfg.get("freeze_encoder_epochs", 0)
+    if freeze_epochs > 0:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        log.info(f"Encoder frozen for first {freeze_epochs} epochs.")
+
+    # ── Loss, optimizer, scheduler ────────────────────────────────────
+    criterion = BalancedDepthLoss(
+        lamb1=ft_cfg.get("lamb1", 0.5),
+        lamb2=ft_cfg.get("lamb2", 1.0),
+        lamb3=ft_cfg.get("lamb3", 1.0),
+    ).to(device)
+
+    opt = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=ft_cfg.lr, weight_decay=ft_cfg.weight_decay,
+        betas=(0.9, 0.999))
+
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        opt, step_size=ft_cfg.lr_step_size, gamma=ft_cfg.lr_gamma)
+
+    # ── Data ──────────────────────────────────────────────────────────
+    train_loader = get_depth_loader(cfg, device=device, split="train")
+    val_every = ft_cfg.get("val_every", 5)
+
+    scaler = GradScaler(enabled=(device == "cuda"))
+    history = {"total": [], "depth": [], "grad": [], "norm": [], "ssim": []}
+    best_metrics = {}
+
+    # ── WandB ─────────────────────────────────────────────────────────
+    wandb_active = _init_wandb(cfg) if cfg.get("use_wandb", False) else False
+
+    # ── Training loop ─────────────────────────────────────────────────
+    for epoch in range(1, epochs + 1):
+        model.train()
+
+        # Unfreeze encoder after freeze period
+        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+            for param in model.encoder.parameters():
+                param.requires_grad = True
+            # Re-create optimizer with all parameters
+            opt = torch.optim.AdamW(
+                model.parameters(), lr=ft_cfg.lr,
+                weight_decay=ft_cfg.weight_decay, betas=(0.9, 0.999))
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                opt, step_size=ft_cfg.lr_step_size, gamma=ft_cfg.lr_gamma)
+            log.info(f"Encoder unfrozen at epoch {epoch}.")
+
+        ep_losses = {k: 0.0 for k in history}
+        pbar = tqdm.tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+
+        for rgb, depth_gt in pbar:
+            rgb = rgb.to(device, non_blocking=True)
+            depth_gt = depth_gt.to(device, non_blocking=True)
+
+            with autocast(device, dtype=torch.bfloat16):
+                depth_pred = model(rgb)
+                loss, components = criterion(depth_pred, depth_gt)
+
+            opt.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+
+            for k in ep_losses:
+                ep_losses[k] += components[k]
+            pbar.set_postfix(loss=f"{components['total']:.4f}")
+
+            if wandb_active:
+                import wandb
+                wandb.log({f"train/{k}": v for k, v in components.items()})
+
+        # ── Epoch summary ─────────────────────────────────────────────
+        scheduler.step()
+        n = len(train_loader)
+        for k in history:
+            history[k].append(ep_losses[k] / n)
+
+        log.info(f"Epoch {epoch:>3} | loss={history['total'][-1]:.4f} "
+                 f"depth={history['depth'][-1]:.4f} "
+                 f"grad={history['grad'][-1]:.4f} "
+                 f"lr={scheduler.get_last_lr()[0]:.6f}")
+
+        # ── Live loss curves (overwritten each epoch) ─────────────
+        _plot_depth_loss_curves(history, variant)
+
+        # ── Checkpoint ────────────────────────────────────────────────
+        ckpt_every = cfg.get("ckpt_every", 10)
+        if epoch % ckpt_every == 0:
+            ckpt_dir = Path("checkpoints")
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"meter_{variant}_epoch{epoch}.pth"
+            torch.save(model.state_dict(), ckpt_path)
+            log.info(f"Checkpoint saved: {ckpt_path}")
+
+            # Depth prediction visualization
+            from src.visualize import visualize_depth_inline
+            vis_path = visualize_depth_inline(
+                model, variant, epoch, out_dir="plots", device=device)
+            log.info(f"Depth visualization saved: {vis_path}")
+            model.train()
+
+        # ── Validation ────────────────────────────────────────────────
+        if epoch % val_every == 0 or epoch == epochs:
+            metrics = _validate_depth(model, cfg, device)
+            log.info(f"  Val | d1={metrics['delta1']:.4f} "
+                     f"RMSE={metrics['rmse']:.4f} "
+                     f"REL={metrics['rel']:.4f}")
+            best_metrics = metrics
+
+            if wandb_active:
+                import wandb
+                wandb.log({f"val/{k}": v for k, v in metrics.items()})
+
+    # ── Save final model ──────────────────────────────────────────────
+    ckpt_dir = Path("checkpoints")
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    final_path = ckpt_dir / f"meter_{variant}_final.pth"
+    torch.save(model.state_dict(), final_path)
+    log.info(f"Final model saved: {final_path}")
+
+    # Final depth visualization
+    from src.visualize import visualize_depth_inline
+    vis_path = visualize_depth_inline(
+        model, variant, epochs, out_dir="plots", device=device)
+    log.info(f"Final depth visualization: {vis_path}")
+
+    if wandb_active:
+        import wandb
+        wandb.finish()
+
+
+    return {"history": history, "best_metrics": best_metrics}
+
+
+@torch.no_grad()
+def _validate_depth(model, cfg, device) -> dict:
+    """Run validation and compute depth metrics."""
+    from src.data import get_depth_loader
+    from src.loss import compute_depth_metrics
+
+    model.eval()
+    val_loader = get_depth_loader(cfg, device=device, split="val")
+
+    all_metrics = []
+    for rgb, depth_gt in val_loader:
+        rgb = rgb.to(device, non_blocking=True)
+        depth_gt = depth_gt.to(device, non_blocking=True)
+        depth_pred = model(rgb)
+        metrics = compute_depth_metrics(depth_pred, depth_gt)
+        all_metrics.append(metrics)
+
+    # Average metrics across batches
+    avg = {}
+    for key in all_metrics[0]:
+        avg[key] = sum(m[key] for m in all_metrics) / len(all_metrics)
+    return avg
+
+
+def _plot_depth_loss_curves(history: dict, variant: str):
+    """Save depth fine-tuning loss curves."""
+    import matplotlib.pyplot as plt
+
+    plots_dir = Path("plots")
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    epochs_range = range(1, len(history["total"]) + 1)
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+
+    axes[0].plot(epochs_range, history["total"], "b-", linewidth=2)
+    axes[0].set_title("Total BLF Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(epochs_range, history["depth"], "r-", linewidth=2)
+    axes[1].set_title("L1 Depth Loss")
+    axes[1].set_xlabel("Epoch")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(epochs_range, history["grad"], "g-", linewidth=2)
+    axes[2].set_title("Gradient Loss")
+    axes[2].set_xlabel("Epoch")
+    axes[2].grid(True, alpha=0.3)
+
+    axes[3].plot(epochs_range, history["ssim"], "m-", linewidth=2)
+    axes[3].set_title("SSIM Loss")
+    axes[3].set_xlabel("Epoch")
+    axes[3].grid(True, alpha=0.3)
+
+    plt.suptitle(f"METER Depth Fine-tuning — MobileViT-{variant.upper()}", fontsize=13)
+    plt.tight_layout()
+    out_path = plots_dir / f"depth_loss_curves_{variant}.png"
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    log.info(f"Depth loss curves saved: {out_path}")
     plt.close(fig)
