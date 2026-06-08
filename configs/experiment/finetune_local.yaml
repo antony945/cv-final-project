@@ -7,12 +7,12 @@ variant: xxs
 
 data:
   dataset: nyu
-  n_samples: 1000
+  n_samples: 4000
 
 finetune:
   resolution: [192, 256]
   epochs: 60
-  bs: 8
+  bs: 16
   lr: 0.001
   weight_decay: 0.01
   lr_step_size: 20

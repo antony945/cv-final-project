@@ -165,6 +165,9 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             log.info(f"Epoch {epoch:>3} | lejepa={ep_lejepa:.4f} "
                      f"sigreg={ep_sig:.4f} inv={ep_inv:.4f}")
 
+            # ── Live loss curves (overwritten each epoch) ─────────────
+            _plot_loss_curves(history, variant)
+
             # ── Checkpoint ────────────────────────────────────────────
             if epoch % cfg.ckpt_every == 0:
                 ckpt_dir = Path("checkpoints")
@@ -224,10 +227,6 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     if wandb_active:
         import wandb
         wandb.finish()
-
-    # ── Plot loss curves (if any epochs completed) ────────────────────
-    if history["lejepa"]:
-        _plot_loss_curves(history, variant)
 
     return history
 
@@ -397,6 +396,9 @@ def finetune_depth(cfg: DictConfig) -> dict:
                  f"grad={history['grad'][-1]:.4f} "
                  f"lr={scheduler.get_last_lr()[0]:.6f}")
 
+        # ── Live loss curves (overwritten each epoch) ─────────────
+        _plot_depth_loss_curves(history, variant)
+
         # ── Checkpoint ────────────────────────────────────────────────
         ckpt_every = cfg.get("ckpt_every", 10)
         if epoch % ckpt_every == 0:
@@ -442,9 +444,6 @@ def finetune_depth(cfg: DictConfig) -> dict:
         import wandb
         wandb.finish()
 
-    # ── Plot loss curves ──────────────────────────────────────────────
-    if history["total"]:
-        _plot_depth_loss_curves(history, variant)
 
     return {"history": history, "best_metrics": best_metrics}
 
