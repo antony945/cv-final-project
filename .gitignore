@@ -20,3 +20,5 @@ outputs/xxs_**
 *.gslides
 *.gdoc
 *.gsheet
+
+models/
