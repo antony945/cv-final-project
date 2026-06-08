@@ -23,8 +23,17 @@ os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
-    from src.train import pretrain_lejepa
-    pretrain_lejepa(cfg)
+    task = cfg.get("task", "pretrain")
+    if task == "pretrain":
+        from src.train import pretrain_lejepa
+        pretrain_lejepa(cfg)
+    elif task == "finetune":
+        raise NotImplementedError(
+            "Fine-tuning (depth prediction) not yet implemented. "
+            "Use task=pretrain for LeJEPA self-supervised pre-training."
+        )
+    else:
+        raise ValueError(f"Unknown task: {task}. Expected 'pretrain' or 'finetune'.")
 
 
 if __name__ == "__main__":

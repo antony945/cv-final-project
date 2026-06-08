@@ -15,6 +15,7 @@ from src.config import DEVICE, EMB_DIM
 from src.data import get_pretrain_loader
 from src.model import MobileViTLeJEPA
 from src.loss import SIGReg, compute_lejepa_loss
+from omegaconf import OmegaConf
 
 
 def _denorm_view(t: torch.Tensor) -> np.ndarray:
@@ -33,8 +34,13 @@ def run_verify(variant: str = "xxs", resolution: int = 128,
 
     # ── 1. Dataset check ──────────────────────────────────────────────
     print("\n[1/3] Loading dataset and showing samples...")
-    loader = get_pretrain_loader(batch_size=4, n_samples=50,
-                                 n_views=n_views, resolution=resolution)
+    verify_cfg = OmegaConf.create({
+        "data": {"dataset": "nyu", "n_samples": 50},
+        "n_views": n_views,
+        "resolution": resolution,
+        "bs": 4,
+    })
+    loader = get_pretrain_loader(verify_cfg)
 
     batch_views, _ = next(iter(loader))
     B, V, C, H, W = batch_views.shape

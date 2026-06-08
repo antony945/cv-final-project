@@ -87,9 +87,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr,
                             weight_decay=5e-2)
 
-    loader = get_pretrain_loader(batch_size=cfg.bs, n_samples=cfg.n_samples,
-                                 n_views=cfg.n_views, resolution=cfg.resolution,
-                                 device=device)
+    loader = get_pretrain_loader(cfg, device=device)
 
     # ── Scheduler: 1-epoch warmup → cosine decay ─────────────────────
     warmup_steps = len(loader)

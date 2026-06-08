@@ -5,7 +5,8 @@
 epochs: 40
 bs: 4
 lr: 2e-3
-n_samples: 100
+data:
+  n_samples: 100
 ckpt_every: 5
 use_wandb: false
 
