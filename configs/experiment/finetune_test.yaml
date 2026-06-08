@@ -10,7 +10,7 @@ data:
   n_samples: 50
 
 finetune:
-  resolution: [256, 192]
+  resolution: [192, 256]
   epochs: 2
   bs: 4
   lr: 0.001

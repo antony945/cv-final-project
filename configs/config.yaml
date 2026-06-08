@@ -30,7 +30,7 @@ ckpt_every: 10 # save backbone weights every N epochs
 
 # ── METER Fine-tuning (depth estimation) ──────────────────────────────
 finetune:
-  resolution: [256, 192] # [H, W] — official METER NYU resolution
+  resolution: [192, 256] # [H, W] — official METER NYU resolution
   epochs: 60
   bs: 128
   lr: 0.001

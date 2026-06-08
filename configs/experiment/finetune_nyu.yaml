@@ -11,7 +11,7 @@ data:
   n_samples: 47584 # full NYU training set
 
 finetune:
-  resolution: [256, 192]
+  resolution: [192, 256]
   epochs: 60
   bs: 128
   lr: 0.001
