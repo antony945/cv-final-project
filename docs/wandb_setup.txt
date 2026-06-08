@@ -1,0 +1,78 @@
+Weights & Biases (wandb) Setup
+================================
+
+What is wandb?
+--------------
+Weights & Biases is a free experiment-tracking tool for ML. It logs your
+training metrics (loss curves, learning rate, GPU usage) in real-time to a
+web dashboard at wandb.ai. You can compare runs, share results, and
+reproduce experiments later because it saves all hyperparameters automatically.
+
+The official LeJEPA example uses wandb, so we follow the same practice.
+
+
+Step 1: Create a free account
+-----------------------------
+Go to: https://wandb.ai/signup
+(Free for personal/academic use, no credit card required)
+
+
+Step 2: Install wandb
+---------------------
+Already included in pyproject.toml dependencies. After running:
+
+    uv sync
+
+wandb will be available.
+
+
+Step 3: Login (one-time)
+------------------------
+Run in your terminal:
+
+    wandb login
+
+It will ask you to paste your API key. Get it from:
+    https://wandb.ai/authorize
+
+This saves a token locally (~/.netrc) so you never need to do it again.
+
+
+Step 4: Run training
+--------------------
+Just run training normally:
+
+    uv run python -m src.main train
+
+wandb will automatically:
+- Create a project called "lejepa-meter" (or whatever WANDB_PROJECT is set to)
+- Log per-batch metrics: train/lejepa, train/sigreg, train/inv
+- Log system metrics: GPU utilization, memory, temperature
+- Save all hyperparameters from config.py
+- Print a URL to view your run live in the browser
+
+
+Step 5: View results
+--------------------
+Open your browser to: https://wandb.ai/<your-username>/lejepa-meter
+
+You will see:
+- Live loss curves updating during training
+- A table of all runs with hyperparameters
+- System performance metrics (GPU, CPU, memory)
+
+
+How to disable wandb
+--------------------
+If you don't want to use wandb (or haven't configured it), set in .env:
+
+    USE_WANDB=false
+
+Training will fall back to console-only logging (print statements).
+
+
+Troubleshooting
+---------------
+- "wandb: ERROR Run initialization failed": run `wandb login` again
+- "No module named wandb": run `uv sync` to install dependencies
+- Offline mode: set `WANDB_MODE=offline` in .env (logs locally, sync later)

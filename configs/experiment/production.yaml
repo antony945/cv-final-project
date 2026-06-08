@@ -1,0 +1,10 @@
+# @package _global_
+# Full production run — ~6h on Colab T4
+# Usage: uv run python -m src.main +experiment=production
+
+epochs: 200
+bs: 64
+lr: 5e-4 # scaled from 2e-3 for BS=64
+n_samples: 47584 # full NYU Depth V2 train set
+ckpt_every: 25
+use_wandb: true

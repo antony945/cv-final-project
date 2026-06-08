@@ -1,0 +1,41 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  LeJEPA Pre-training — Base Configuration
+#  Override with: +experiment=test, +experiment=local, etc.
+#  CLI overrides: uv run python -m src.main epochs=100 bs=32
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ── Model ──────────────────────────────────────────────────────────────
+variant: xxs # xxs (0.71M) | xs (1.45M) | s (3.29M)
+device: auto # auto | cpu | cuda
+
+# ── LeJEPA Pre-training ────────────────────────────────────────────────
+epochs: 50
+bs: 64 # batch size (images per step)
+lr: 2e-3 # learning rate (scale with BS: lr = 2e-3 × bs/256)
+lamb: 0.02 # λ — SIGReg weight (the only LeJEPA hyperparameter)
+n_views: 4 # augmented views per image
+proj_dim: 16 # projector output dim (paper recommends 16)
+resolution: 128 # square crop size for SSL pre-training
+
+# ── Data ───────────────────────────────────────────────────────────────
+n_samples: 1000 # NYU images to load (max ~47584)
+
+# ── Checkpointing ─────────────────────────────────────────────────────
+ckpt_every: 10 # save backbone weights every N epochs
+
+# ── Experiment tracking ────────────────────────────────────────────────
+use_wandb: false
+wandb_project: lejepa-meter
+
+# ── Hydra output directory ─────────────────────────────────────────────
+defaults:
+  - _self_
+  - override hydra/job_logging: default
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: outputs/${variant}_${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/multirun/${now:%Y-%m-%d_%H-%M-%S}

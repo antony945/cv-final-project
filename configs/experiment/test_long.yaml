@@ -1,0 +1,10 @@
+# @package _global_
+# Longer test — ~10 min on any hardware
+# Usage: uv run python -m src.main +experiment=test_long
+
+epochs: 40
+bs: 64
+lr: 2e-3
+n_samples: 1000
+ckpt_every: 5
+use_wandb: false

@@ -1,0 +1,13 @@
+# @package _global_
+# Quick sanity test — ~2 min on any hardware
+# Usage: uv run python -m src.main +experiment=test
+
+epochs: 40
+bs: 4
+lr: 2e-3
+n_samples: 100
+ckpt_every: 5
+use_wandb: false
+
+# no of views should be related to lambda, in minimal example no of views = 4, lambda = 0.02
+# in paper they suggest lambda = 0.05, no of views = 10 (2 global + 8 local), batch size >= 128
