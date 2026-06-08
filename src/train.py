@@ -406,6 +406,13 @@ def finetune_depth(cfg: DictConfig) -> dict:
             torch.save(model.state_dict(), ckpt_path)
             log.info(f"Checkpoint saved: {ckpt_path}")
 
+            # Depth prediction visualization
+            from src.visualize import visualize_depth_inline
+            vis_path = visualize_depth_inline(
+                model, variant, epoch, out_dir="plots", device=device)
+            log.info(f"Depth visualization saved: {vis_path}")
+            model.train()
+
         # ── Validation ────────────────────────────────────────────────
         if epoch % val_every == 0 or epoch == epochs:
             metrics = _validate_depth(model, cfg, device)
@@ -424,6 +431,12 @@ def finetune_depth(cfg: DictConfig) -> dict:
     final_path = ckpt_dir / f"meter_{variant}_final.pth"
     torch.save(model.state_dict(), final_path)
     log.info(f"Final model saved: {final_path}")
+
+    # Final depth visualization
+    from src.visualize import visualize_depth_inline
+    vis_path = visualize_depth_inline(
+        model, variant, epochs, out_dir="plots", device=device)
+    log.info(f"Final depth visualization: {vis_path}")
 
     if wandb_active:
         import wandb

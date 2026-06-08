@@ -57,6 +57,6 @@ hydra:
   job:
     chdir: true
   run:
-    dir: outputs/${variant}_${now:%Y-%m-%d_%H-%M-%S}
+    dir: outputs/${task}/${variant}_${now:%Y-%m-%d_%H-%M-%S}
   sweep:
     dir: outputs/multirun/${now:%Y-%m-%d_%H-%M-%S}
