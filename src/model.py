@@ -250,6 +250,118 @@ def mobilevit_s(image_size):
 
 _BACKBONE_FN = {"xxs": mobilevit_xxs, "xs": mobilevit_xs, "s": mobilevit_s}
 
+# Channel configs for decoder (derived from official METER source)
+_DECODER_CFG = {
+    "xxs": {"in_ch": 160, "reduce_ch": 64,
+             "up_chs": [(64, 32, 96), (32, 16, 64), (16, 8, 32)], "out_ch": 8},
+    "xs":  {"in_ch": 192, "reduce_ch": 128,
+             "up_chs": [(128, 64, 144), (64, 32, 96), (32, 16, 64)], "out_ch": 16},
+    "s":   {"in_ch": 320, "reduce_ch": 128,
+             "up_chs": [(128, 64, 192), (64, 32, 128), (32, 16, 80)], "out_ch": 16},
+}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  METER Decoder
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class UpSampleBlock(nn.Module):
+    """Decoder upsampling block: ConvTranspose2d → concat skip → SeparableConv + ReLU."""
+
+    def __init__(self, inp: int, oup: int, sep_conv_filters: int):
+        super().__init__()
+        self.conv2d_transpose = nn.ConvTranspose2d(
+            inp, oup, kernel_size=3, stride=2, padding=1,
+            output_padding=1, bias=False)
+        self.end_up_layer = nn.Sequential(
+            SeparableConv2d(sep_conv_filters, oup, kernel_size=3),
+            nn.ReLU())
+
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.conv2d_transpose(x)
+        # Pad skip if spatial dims don't match (can happen with odd resolutions)
+        if x.shape[-1] != skip.shape[-1]:
+            skip = nn.functional.pad(skip, (0, x.shape[-1] - skip.shape[-1]))
+        if x.shape[-2] != skip.shape[-2]:
+            skip = nn.functional.pad(skip, (0, 0, 0, x.shape[-2] - skip.shape[-2]))
+        x = torch.cat([x, skip], dim=1)
+        return self.end_up_layer(x)
+
+
+class METERDecoder(nn.Module):
+    """METER fully-convolutional decoder with skip connections.
+
+    Takes encoder output + 4 skip connections, produces dense depth map.
+    """
+
+    def __init__(self, variant: str = "xxs"):
+        super().__init__()
+        cfg = _DECODER_CFG[variant]
+
+        self.conv_in = nn.Conv2d(cfg["in_ch"], cfg["reduce_ch"],
+                                 kernel_size=1, bias=False)
+
+        up_chs = cfg["up_chs"]
+        self.up1 = UpSampleBlock(up_chs[0][0], up_chs[0][1], up_chs[0][2])
+        self.up2 = UpSampleBlock(up_chs[1][0], up_chs[1][1], up_chs[1][2])
+        self.up3 = UpSampleBlock(up_chs[2][0], up_chs[2][1], up_chs[2][2])
+
+        self.conv_out = nn.Conv2d(cfg["out_ch"], 1, kernel_size=3, padding=1,
+                                  bias=False)
+
+    def forward(self, x: torch.Tensor, skips: list[torch.Tensor],
+                target_size: tuple[int, int] | None = None) -> torch.Tensor:
+        """
+        Args:
+            x: encoder output (B, C_final, H/32, W/32)
+            skips: [y0, y1, y2, y3] from encoder
+            target_size: (H, W) for final bilinear interpolation
+        Returns:
+            depth: (B, 1, H, W)
+        """
+        x = self.conv_in(x)
+        x = self.up1(x, skips[3])   # H/32 → H/16
+        x = self.up2(x, skips[2])   # H/16 → H/8
+        x = self.up3(x, skips[1])   # H/8  → H/4
+        x = self.conv_out(x)        # → (B, 1, H/4, W/4)
+
+        if target_size is not None:
+            x = nn.functional.interpolate(
+                x, size=target_size, mode="bilinear", align_corners=False)
+
+        return nn.functional.relu(x)  # Depth must be ≥ 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Full METER Model (encoder + decoder)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class METERModel(nn.Module):
+    """Full METER model: MobileViT encoder + convolutional decoder.
+
+    Input:  (B, 3, H, W) — single RGB image
+    Output: (B, 1, H, W) — dense depth map
+    """
+
+    def __init__(self, variant: str = "xxs",
+                 resolution: tuple[int, int] = (256, 192)):
+        super().__init__()
+        self.resolution = resolution  # (H, W) target output
+        self.encoder = _BACKBONE_FN[variant](resolution)
+        self.decoder = METERDecoder(variant)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat, skips = self.encoder(x)
+        return self.decoder(feat, skips, target_size=self.resolution)
+
+    def load_pretrained_encoder(self, checkpoint_path: str):
+        """Load pretrained encoder weights from a LeJEPA checkpoint."""
+        state_dict = torch.load(checkpoint_path, map_location="cpu",
+                                weights_only=True)
+        self.encoder.load_state_dict(state_dict, strict=False)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LeJEPA wrapper — backbone + GAP + projector

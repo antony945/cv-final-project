@@ -28,10 +28,8 @@ def main(cfg: DictConfig):
         from src.train import pretrain_lejepa
         pretrain_lejepa(cfg)
     elif task == "finetune":
-        raise NotImplementedError(
-            "Fine-tuning (depth prediction) not yet implemented. "
-            "Use task=pretrain for LeJEPA self-supervised pre-training."
-        )
+        from src.train import finetune_depth
+        finetune_depth(cfg)
     else:
         raise ValueError(f"Unknown task: {task}. Expected 'pretrain' or 'finetune'.")
 

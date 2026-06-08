@@ -28,6 +28,22 @@ resolution: 128 # square crop size for SSL pre-training
 # ── Checkpointing ─────────────────────────────────────────────────────
 ckpt_every: 10 # save backbone weights every N epochs
 
+# ── METER Fine-tuning (depth estimation) ──────────────────────────────
+finetune:
+  resolution: [256, 192] # [H, W] — official METER NYU resolution
+  epochs: 60
+  bs: 128
+  lr: 0.001
+  weight_decay: 0.01
+  lr_step_size: 20 # StepLR: ×gamma every N epochs
+  lr_gamma: 0.1
+  lamb1: 0.5 # gradient loss weight
+  lamb2: 1.0 # normal loss weight
+  lamb3: 1.0 # SSIM loss weight
+  freeze_encoder_epochs: 0 # 0 = train end-to-end from start
+  pretrained_encoder: null # path to LeJEPA checkpoint (optional)
+  val_every: 5 # validate every N epochs
+
 # ── Experiment tracking ────────────────────────────────────────────────
 use_wandb: false
 wandb_project: lejepa-meter
