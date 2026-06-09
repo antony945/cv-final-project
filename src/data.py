@@ -252,6 +252,7 @@ def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False,
                 if f is None:
                     continue
                 h5_bytes = f.read()
+                f.close()
                 h5f = h5py.File(io.BytesIO(h5_bytes), "r")
                 rgb = np.array(h5f["rgb"])            # (3, H, W) uint8
                 rgb = np.transpose(rgb, (1, 2, 0))   # (H, W, 3)
@@ -441,6 +442,10 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
     dev = device or DEVICE
     dataset_name = cfg.data.dataset
     n_samples = cfg.data.n_samples
+
+    # For validation, load all available samples (ignore n_samples cap)
+    if split == "val":
+        n_samples = 999_999
 
     if dataset_name not in _DEPTH_DATASETS:
         raise ValueError(f"Unknown depth dataset: {dataset_name}. "
