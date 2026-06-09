@@ -353,17 +353,12 @@ class MmapNYUPretrainDataset(BasePretrainDataset):
     def __init__(self, n_samples: int, n_views: int = 4, resolution: int = 128,
                  mmap_resolution: tuple[int, int] = (192, 256)):
         super().__init__(n_views=n_views, resolution=resolution)
-        from src.config import ROOT, get_nyu_mmap_dir
 
         h, w = mmap_resolution
-        p = Path(get_nyu_mmap_dir())
-        if not p.is_absolute():
-            p = ROOT / p
-
-        rgb_path = p / f"nyu_train_rgb_{h}x{w}.npy"
-        if not rgb_path.exists():
+        rgb_path = _find_mmap_file("train", "rgb", h, w)
+        if rgb_path is None:
             raise FileNotFoundError(
-                f"Memory-mapped RGB file not found at {rgb_path}. "
+                f"Memory-mapped RGB file not found for {h}x{w}. "
                 f"Run: uv run python -m src.preprocess {h} {w}"
             )
 
@@ -389,19 +384,14 @@ class MmapNYUDepthDataset(BaseDepthDataset):
     def __init__(self, n_samples: int, resolution: tuple[int, int] | int = (192, 256),
                  train: bool = True, augment: bool = True, split: str = "train"):
         super().__init__(resolution=resolution, train=train, augment=augment)
-        from src.config import ROOT, get_nyu_mmap_dir
 
         h, w = self.resolution
-        p = Path(get_nyu_mmap_dir())
-        if not p.is_absolute():
-            p = ROOT / p
+        rgb_path = _find_mmap_file(split, "rgb", h, w)
+        depth_path = _find_mmap_file(split, "depth", h, w)
 
-        rgb_path = p / f"nyu_{split}_rgb_{h}x{w}.npy"
-        depth_path = p / f"nyu_{split}_depth_{h}x{w}.npy"
-
-        if not rgb_path.exists() or not depth_path.exists():
+        if rgb_path is None or depth_path is None:
             raise FileNotFoundError(
-                f"Memory-mapped files not found at {p}. "
+                f"Memory-mapped files not found for {split} {h}x{w}. "
                 f"Run: uv run python -m src.preprocess {h} {w}"
             )
 
@@ -649,37 +639,55 @@ class CachedKITTIDepthDataset(BaseDepthDataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Helpers — Mmap file existence checks
+#  Helpers — Mmap file discovery (glob-based, supports sample count in name)
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def _get_mmap_dir() -> Path:
+    """Resolve the mmap directory path."""
+    from src.config import ROOT, get_nyu_mmap_dir
+    p = Path(get_nyu_mmap_dir())
+    if not p.is_absolute():
+        p = ROOT / p
+    return p
+
+
+def _find_mmap_file(split: str, kind: str, h: int, w: int) -> Path | None:
+    """Find a mmap .npy file by glob, supporting both old and new naming.
+
+    Naming formats:
+      Old: nyu_{split}_{kind}_{H}x{W}.npy
+      New: nyu_{split}_{kind}_{H}x{W}_N{count}.npy
+
+    Returns the path if found, None otherwise.
+    """
+    p = _get_mmap_dir()
+    # Try new format first (with sample count)
+    matches = sorted(p.glob(f"nyu_{split}_{kind}_{h}x{w}_N*.npy"))
+    if matches:
+        return matches[0]
+    # Fall back to old format (without count)
+    old = p / f"nyu_{split}_{kind}_{h}x{w}.npy"
+    if old.exists():
+        return old
+    return None
 
 
 def _mmap_rgb_exists(resolution: tuple[int, int] | int, split: str) -> bool:
     """Check if preprocessed memory-mapped RGB file exists (pretrain only needs RGB)."""
-    from src.config import ROOT, get_nyu_mmap_dir
-
     if isinstance(resolution, int):
         resolution = (resolution, resolution)
     h, w = resolution
-
-    p = Path(get_nyu_mmap_dir())
-    if not p.is_absolute():
-        p = ROOT / p
-    return (p / f"nyu_{split}_rgb_{h}x{w}.npy").exists()
+    return _find_mmap_file(split, "rgb", h, w) is not None
 
 
 def _mmap_files_exist(resolution: tuple[int, int] | int, split: str) -> bool:
     """Check if preprocessed memory-mapped RGB + depth files exist."""
-    from src.config import ROOT, get_nyu_mmap_dir
-
     if isinstance(resolution, int):
         resolution = (resolution, resolution)
     h, w = resolution
-
-    p = Path(get_nyu_mmap_dir())
-    if not p.is_absolute():
-        p = ROOT / p
-    return ((p / f"nyu_{split}_rgb_{h}x{w}.npy").exists() and
-            (p / f"nyu_{split}_depth_{h}x{w}.npy").exists())
+    return (_find_mmap_file(split, "rgb", h, w) is not None and
+            _find_mmap_file(split, "depth", h, w) is not None)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

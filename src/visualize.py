@@ -261,7 +261,7 @@ def _load_val_samples(n_images: int, resolution: tuple[int, int] = VIS_RES):
     Uses mmap files if available, otherwise falls back to tar/h5 or HuggingFace.
     """
     from src.config import HF_TOKEN, HF_OFFLINE, get_nyu_dataset_path, get_nyu_mmap_dir, ROOT
-    from src.data import _mmap_files_exist
+    from src.data import _mmap_files_exist, _find_mmap_file
     from pathlib import Path
     import os
 
@@ -269,12 +269,10 @@ def _load_val_samples(n_images: int, resolution: tuple[int, int] = VIS_RES):
 
     # Try mmap first (fastest, consistent with training)
     if _mmap_files_exist(resolution, "val"):
-        mmap_dir = get_nyu_mmap_dir()
-        p = Path(mmap_dir)
-        if not p.is_absolute():
-            p = ROOT / p
-        rgb_mmap = np.load(str(p / f"nyu_val_rgb_{H}x{W}.npy"), mmap_mode="r")
-        depth_mmap = np.load(str(p / f"nyu_val_depth_{H}x{W}.npy"), mmap_mode="r")
+        rgb_path = _find_mmap_file("val", "rgb", H, W)
+        depth_path = _find_mmap_file("val", "depth", H, W)
+        rgb_mmap = np.load(str(rgb_path), mmap_mode="r")
+        depth_mmap = np.load(str(depth_path), mmap_mode="r")
 
         rgb_tensors = []
         depth_tensors = []
