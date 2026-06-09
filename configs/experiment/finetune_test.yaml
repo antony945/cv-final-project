@@ -4,10 +4,12 @@
 
 task: finetune
 variant: xxs
+compile: true
 
 data:
   dataset: nyu
   n_samples: 50
+  use_cache: false
 
 finetune:
   resolution: [192, 256]

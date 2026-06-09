@@ -5,7 +5,9 @@
 epochs: 200
 bs: 64
 lr: 5e-4 # scaled from 2e-3 for BS=64
+compile: true
 data:
   n_samples: 47584 # full NYU Depth V2 train set
+  use_cache: false
 ckpt_every: 25
 use_wandb: true

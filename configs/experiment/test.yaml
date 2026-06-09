@@ -5,8 +5,10 @@
 epochs: 40
 bs: 4
 lr: 2e-3
+compile: true
 data:
   n_samples: 100
+  use_cache: false
 ckpt_every: 5
 use_wandb: false
 

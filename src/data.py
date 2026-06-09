@@ -13,6 +13,7 @@ import abc
 import glob
 import io
 import logging
+import os
 import random
 import tarfile
 
@@ -27,6 +28,11 @@ from omegaconf import DictConfig
 from src.config import HF_TOKEN, HF_OFFLINE, get_nyu_dataset_path, DEVICE
 
 log = logging.getLogger(__name__)
+
+# Windows spawn-based multiprocessing copies the full dataset per worker,
+# causing OOM with large in-memory datasets. Use 0 on Windows.
+import sys
+_NUM_WORKERS = 0 if sys.platform == "win32" else min(4, os.cpu_count() or 1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -353,6 +359,137 @@ class NYUDepthDataset(BaseDepthDataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Cached NYU Dataset (pre-resized .pt tensors for fast loading)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class CachedNYUDepthDataset(Dataset):
+    """NYU Depth V2 with pre-processed tensor cache for fast training.
+
+    On first use, converts tar/h5 data to pre-resized .pt files.
+    Subsequent runs load directly from cache — no tar/h5/PIL overhead.
+
+    Cache structure: {cache_dir}/{split}_{H}x{W}/sample_{idx}.pt
+    Each .pt file contains: {"rgb": Tensor[3,H,W], "depth": Tensor[1,H,W]}
+    """
+
+    def __init__(self, n_samples: int, resolution: tuple[int, int] | int = 128,
+                 train: bool = True, augment: bool = True, split: str = "train",
+                 cache_dir: str | None = None):
+        from pathlib import Path
+
+        self.train = train
+        self.augment = augment and train
+        if isinstance(resolution, int):
+            resolution = (resolution, resolution)
+        self.resolution = resolution
+        self._split = split
+
+        # Determine cache directory
+        if cache_dir is None:
+            from src.config import ROOT
+            cache_dir = str(ROOT / "datasets" / "nyu_cache")
+        res_str = f"{resolution[0]}x{resolution[1]}"
+        self._cache_path = Path(cache_dir) / f"{split}_{res_str}"
+
+        # Build or load cache
+        if not self._cache_path.exists() or len(list(self._cache_path.glob("*.pt"))) == 0:
+            self._build_cache(n_samples)
+
+        # Load file list (cap to n_samples)
+        all_files = sorted(self._cache_path.glob("*.pt"))
+        self._files = all_files[:n_samples] if n_samples < len(all_files) else all_files
+        log.info(f"{len(self._files)} cached depth samples loaded "
+                 f"({'train' if train else 'val'}, {res_str}).")
+
+        # ImageNet normalization (applied on cached tensors)
+        self._mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        self._std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+    def _build_cache(self, n_samples: int):
+        """One-time preprocessing: load from tar/h5, resize, save as .pt."""
+        from pathlib import Path
+        import torch.nn.functional as F
+
+        log.info(f"Building tensor cache at {self._cache_path} ...")
+        self._cache_path.mkdir(parents=True, exist_ok=True)
+
+        # Load raw samples
+        nyu_path = get_nyu_dataset_path()
+        if nyu_path:
+            samples = _load_nyu_local(nyu_path, n_samples, include_depth=True,
+                                      split=self._split)
+        else:
+            samples = _load_nyu_hf(n_samples, include_depth=True, split=self._split)
+
+        h, w = self.resolution
+        for i, (img_pil, depth_np) in enumerate(samples):
+            # RGB: PIL → tensor [0,1] → resize
+            img_np = np.array(img_pil).astype(np.float32) / 255.0
+            rgb = torch.from_numpy(img_np).permute(2, 0, 1)  # (3, H_orig, W_orig)
+            rgb = F.interpolate(rgb.unsqueeze(0), size=(h, w),
+                                mode="bilinear", align_corners=False).squeeze(0)
+
+            # Depth: numpy → tensor → resize
+            depth = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0)
+            depth = F.interpolate(depth.unsqueeze(0), size=(h, w),
+                                  mode="bilinear", align_corners=False).squeeze(0)
+
+            torch.save({"rgb": rgb, "depth": depth},
+                       self._cache_path / f"sample_{i:06d}.pt")
+
+        log.info(f"Cache built: {len(samples)} samples saved to {self._cache_path}")
+
+    def __len__(self) -> int:
+        return len(self._files)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        data = torch.load(self._files[idx], weights_only=True)
+        rgb = data["rgb"]    # (3, H, W) float32 in [0, 1]
+        depth = data["depth"]  # (1, H, W) float32
+
+        # Fast tensor-space augmentation (no PIL/numpy conversion)
+        if self.augment:
+            rgb, depth = self._tensor_augment(rgb, depth)
+
+        # Normalize RGB (ImageNet stats)
+        rgb = (rgb - self._mean) / self._std
+        return rgb, depth
+
+    def _tensor_augment(self, rgb: torch.Tensor, depth: torch.Tensor
+                        ) -> tuple[torch.Tensor, torch.Tensor]:
+        """METER augmentation in tensor space (fast, no numpy)."""
+        # Random vertical flip
+        if random.random() < 0.5:
+            rgb = rgb.flip(-2)
+            depth = depth.flip(-2)
+
+        # Random horizontal flip
+        if random.random() < 0.5:
+            rgb = rgb.flip(-1)
+            depth = depth.flip(-1)
+
+        # Channel swap
+        if random.random() < 0.5:
+            perm = torch.randperm(3)
+            rgb = rgb[perm]
+
+        # Brightness/gamma shift
+        if random.random() < 0.5:
+            gamma = random.uniform(0.9, 1.1)
+            brightness = random.uniform(0.9, 1.1)
+            rgb = (brightness * rgb.clamp(min=0).pow(gamma)).clamp(0, 1)
+            # Per-channel color
+            colors = torch.empty(3, 1, 1).uniform_(0.9, 1.1)
+            rgb = (rgb * colors).clamp(0, 1)
+            # Depth shift
+            shift = random.uniform(-0.1, 0.1)
+            depth = depth + shift
+
+        return rgb, depth
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  KITTI — Stub (TO IMPLEMENT)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -424,7 +561,8 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
         batch_size=cfg.bs,
         shuffle=True,
         drop_last=True,
-        num_workers=0,
+        num_workers=_NUM_WORKERS,
+        persistent_workers=(_NUM_WORKERS > 0),
         pin_memory=(dev == "cuda"),
     )
 
@@ -459,15 +597,25 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
     batch_size = cfg.get("finetune", {}).get("bs", cfg.get("bs", 8))
     is_train = (split == "train")
 
-    ds_cls = _DEPTH_DATASETS[dataset_name]
-    ds = ds_cls(n_samples=n_samples, resolution=resolution,
-                train=is_train, augment=is_train, split=split)
+    # Use cached .pt dataset if configured (much faster loading)
+    use_cache = cfg.get("data", {}).get("use_cache", False)
+    if use_cache and dataset_name == "nyu":
+        cache_dir = cfg.get("data", {}).get("cache_dir", None)
+        ds = CachedNYUDepthDataset(
+            n_samples=n_samples, resolution=resolution,
+            train=is_train, augment=is_train, split=split,
+            cache_dir=cache_dir)
+    else:
+        ds_cls = _DEPTH_DATASETS[dataset_name]
+        ds = ds_cls(n_samples=n_samples, resolution=resolution,
+                    train=is_train, augment=is_train, split=split)
 
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=is_train,
         drop_last=is_train,
-        num_workers=0,
+        num_workers=_NUM_WORKERS,
+        persistent_workers=(_NUM_WORKERS > 0),
         pin_memory=(dev == "cuda"),
     )
