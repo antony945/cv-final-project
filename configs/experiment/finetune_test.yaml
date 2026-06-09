@@ -10,11 +10,12 @@ data:
   dataset: nyu
   n_samples: 50
   use_cache: false
+  use_mmap: true
 
 finetune:
   resolution: [192, 256]
   epochs: 2
-  bs: 4
+  bs: 16
   lr: 0.001
   weight_decay: 0.01
   lr_step_size: 20
