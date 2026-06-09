@@ -20,7 +20,7 @@ import tarfile
 import h5py
 import numpy as np
 import torch
-import tqdm
+from tqdm.auto import tqdm 
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import v2
@@ -252,7 +252,7 @@ def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False,
         with tarfile.open(tar_path, "r") as tf:
             members = [m for m in tf if m.name.endswith(".h5")]
             cap = min(len(members), n_samples - len(results))
-            for member in tqdm.tqdm(members[:cap],
+            for member in tqdm(members[:cap],
                                     desc=f"  Loading {Path(tar_path).name}",
                                     unit="img"):
                 f = tf.extractfile(member)
@@ -305,7 +305,7 @@ def _load_nyu_hf(n_samples: int, include_depth: bool = False,
     )
 
     results = []
-    pbar = tqdm.tqdm(total=n_samples, desc=f"  Loading NYU {hf_split} (HF)",
+    pbar = tqdm(total=n_samples, desc=f"  Loading NYU {hf_split} (HF)",
                      unit="img")
     for i, row in enumerate(stream):
         if i >= n_samples:
@@ -499,6 +499,54 @@ class CachedNYUDepthDataset(Dataset):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class MmapNYUPretrainDataset(Dataset):
+    """NYU Depth V2 — memory-mapped RGB for LeJEPA pre-training.
+
+    Loads RGB images from preprocessed .npy files (mmap) and applies
+    multi-view augmentation on-the-fly. Depth is ignored.
+
+    Uses the finetune-resolution mmap files as source; the pretrain
+    augmentation pipeline (RandomResizedCrop) handles final sizing.
+    """
+
+    def __init__(self, n_samples: int, n_views: int = 4, resolution: int = 128,
+                 mmap_resolution: tuple[int, int] = (192, 256)):
+        from pathlib import Path
+        from src.config import ROOT, get_nyu_mmap_dir
+
+        self.n_views = n_views
+        self.aug = _get_pretrain_transforms(resolution)
+
+        h, w = mmap_resolution
+        mmap_dir = get_nyu_mmap_dir()
+        p = Path(mmap_dir)
+        if not p.is_absolute():
+            p = ROOT / p
+
+        rgb_path = p / f"nyu_train_rgb_{h}x{w}.npy"
+        if not rgb_path.exists():
+            raise FileNotFoundError(
+                f"Memory-mapped RGB file not found at {rgb_path}. "
+                f"Run preprocessing first:\n"
+                f"  uv run python -m src.preprocess {h} {w}"
+            )
+
+        self._rgb = np.load(str(rgb_path), mmap_mode="r")  # (N, H, W, 3) uint8
+        total = self._rgb.shape[0]
+        self._n = min(n_samples, total)
+
+        log.info(f"{self._n}/{total} mmap pretrain samples loaded ({h}x{w}).")
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        rgb_np = np.array(self._rgb[idx])  # (H, W, 3) uint8 — copy from mmap
+        img = Image.fromarray(rgb_np, mode="RGB")
+        views = torch.stack([self.aug(img) for _ in range(self.n_views)])
+        return views, 0
+
+
 class MmapNYUDepthDataset(Dataset):
     """NYU Depth V2 using memory-mapped .npy files for near-zero RAM usage.
 
@@ -628,6 +676,10 @@ _DEPTH_DATASETS = {
 def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoader:
     """Build the pre-training DataLoader from config.
 
+    Dataset selection priority (same as fine-tuning):
+    1. Memory-mapped .npy files (if use_mmap=true and files exist)
+    2. Load from tar/h5 into RAM (default)
+
     Args:
         cfg: Hydra DictConfig (needs cfg.data.dataset, cfg.data.n_samples,
              cfg.n_views, cfg.resolution, cfg.bs).
@@ -641,8 +693,17 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
         raise ValueError(f"Unknown pretrain dataset: {dataset_name}. "
                          f"Available: {list(_PRETRAIN_DATASETS.keys())}")
 
-    ds_cls = _PRETRAIN_DATASETS[dataset_name]
-    ds = ds_cls(n_samples=n_samples, n_views=cfg.n_views, resolution=cfg.resolution)
+    # Check if mmap files are available (stored at finetune resolution)
+    use_mmap = cfg.get("data", {}).get("use_mmap", False)
+    mmap_resolution = tuple(cfg.get("finetune", {}).get("resolution", [192, 256]))
+
+    if use_mmap and dataset_name == "nyu" and _mmap_files_exist(mmap_resolution, "train"):
+        ds = MmapNYUPretrainDataset(
+            n_samples=n_samples, n_views=cfg.n_views,
+            resolution=cfg.resolution, mmap_resolution=mmap_resolution)
+    else:
+        ds_cls = _PRETRAIN_DATASETS[dataset_name]
+        ds = ds_cls(n_samples=n_samples, n_views=cfg.n_views, resolution=cfg.resolution)
 
     return DataLoader(
         ds,

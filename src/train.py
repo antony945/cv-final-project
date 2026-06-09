@@ -17,7 +17,7 @@ import warnings
 from pathlib import Path
 from torch.amp import autocast
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-import tqdm
+from tqdm.auto import tqdm
 from omegaconf import DictConfig
 
 log = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             net.train()
             ep_lejepa = ep_sig = ep_inv = 0.0
 
-            pbar = tqdm.tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+            pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
             for views, _ in pbar:
                 views = views.to(device, non_blocking=True)
 
@@ -446,7 +446,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 log.info(f"Encoder unfrozen at epoch {epoch}.")
 
             ep_losses = {k: 0.0 for k in history}
-            pbar = tqdm.tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
 
             for rgb, depth_gt in pbar:
                 rgb = rgb.to(device, non_blocking=True)

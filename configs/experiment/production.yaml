@@ -9,5 +9,6 @@ compile: true
 data:
   n_samples: 47584 # full NYU Depth V2 train set
   use_cache: false
+  use_mmap: true
 ckpt_every: 25
 use_wandb: true

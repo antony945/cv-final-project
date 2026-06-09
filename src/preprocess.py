@@ -22,7 +22,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import tqdm
+from tqdm.auto import tqdm
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -57,7 +57,7 @@ def _load_all_from_tars(tar_dir: Path, split: str) -> tuple[list, list]:
     for tar_path in tar_files:
         with tarfile.open(tar_path, "r") as tf:
             members = [m for m in tf if m.name.endswith(".h5")]
-            for member in tqdm.tqdm(members, desc=f"  {Path(tar_path).name}",
+            for member in tqdm(members, desc=f"  {Path(tar_path).name}",
                                     unit="img"):
                 f = tf.extractfile(member)
                 if f is None:
@@ -93,7 +93,7 @@ def _load_all_from_hf(split: str) -> tuple[list, list]:
 
     rgbs = []
     depths = []
-    for i, row in enumerate(tqdm.tqdm(ds, desc=f"  Loading {hf_split}", unit="img")):
+    for i, row in enumerate(tqdm(ds, desc=f"  Loading {hf_split}", unit="img")):
         rgb = np.array(row["image"].convert("RGB"))  # (H, W, 3)
         depth = np.array(row["depth_map"])            # (H, W)
         rgbs.append(rgb)
@@ -129,7 +129,7 @@ def preprocess_split(split: str, h: int, w: int, out_dir: Path,
         str(depth_path), mode="w+", dtype=np.float32, shape=(n, h, w))
 
     # Resize and write
-    for i, (rgb, dep) in enumerate(tqdm.tqdm(zip(rgbs, depths),
+    for i, (rgb, dep) in enumerate(tqdm(zip(rgbs, depths),
                                               total=n, desc="  Resizing",
                                               unit="img")):
         # RGB: resize with PIL (high quality)

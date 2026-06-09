@@ -147,13 +147,74 @@ uv run python -m src.main +experiment=finetune_test
 # Full METER training on NYU (60 epochs, bs=128)
 uv run python -m src.main +experiment=finetune_nyu
 
-# With pre-trained encoder from LeJEPA
-uv run python -m src.main +experiment=finetune_nyu \
-    finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
-
 # Custom variant
 uv run python -m src.main +experiment=finetune_nyu variant=xs
 ```
+
+#### Using a pre-trained LeJEPA encoder
+
+After pre-training with LeJEPA/SIGReg, you can initialize the METER encoder with those weights instead of training from scratch:
+
+```bash
+uv run python -m src.main +experiment=finetune_nyu \
+    finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
+```
+
+The encoder weights are loaded from the LeJEPA checkpoint and used as the starting point for fine-tuning. The decoder is always randomly initialized.
+
+#### Freezing the encoder
+
+When using a pre-trained encoder, you can optionally **freeze** it for the first N epochs so only the decoder trains initially:
+
+```bash
+uv run python -m src.main +experiment=finetune_nyu \
+    finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth \
+    finetune.freeze_encoder_epochs=10
+```
+
+After epoch N, the encoder is automatically unfrozen and the optimizer is re-created to include all parameters. This is a form of staged/gradual training.
+
+**When to freeze (`freeze_encoder_epochs > 0`):**
+
+| Pros | Cons |
+|------|------|
+| Prevents catastrophic forgetting of learned SSL features in early epochs when the decoder produces random gradients | Limits capacity — encoder can't adapt to the depth task during frozen phase |
+| Decoder converges faster since it trains against stable features | Requires tuning the freeze duration (too short = no benefit, too long = wasted epochs) |
+| Useful when pre-training data is much larger/richer than fine-tuning data | The optimizer/scheduler resets at unfreeze, which can cause a learning rate discontinuity |
+| Acts as implicit regularization — reduces effective model capacity early on | With small encoders (xxs/xs), features may not be rich enough on their own — joint training helps |
+
+**When to train end-to-end from the start (`freeze_encoder_epochs=0`, default):**
+
+| Pros | Cons |
+|------|------|
+| Encoder features adapt to the depth task from epoch 1 | Pre-trained features may degrade before decoder catches up |
+| Simpler — one continuous training phase, no hyperparameter to tune | Higher risk of overfitting with small datasets if encoder + decoder overfit together |
+| Best for small encoders where learned features need refinement | — |
+
+**Rule of thumb**: Freeze for 5–15 epochs when you have a strong pre-trained encoder (trained for many epochs on large data). Skip freezing for quick experiments or when the encoder is small (xxs/xs) and benefits from joint adaptation.
+
+#### Resuming interrupted training
+
+Fine-tuning saves **full-state checkpoints** (model + optimizer + scheduler + epoch + loss history + RNG state) at regular intervals and on interrupt. To resume from where training stopped:
+
+```bash
+uv run python -m src.main +experiment=finetune_nyu \
+    finetune.resume=outputs/finetune/xxs_2026-06-08_21-09-28/checkpoints/meter_xxs_epoch10.pth
+```
+
+Resume restores:
+- Model weights (encoder + decoder)
+- Optimizer state (momentum buffers, adaptive learning rates)
+- Scheduler state (correct LR for the resumed epoch)
+- Training history (loss curves continue seamlessly)
+- RNG state (reproducible data ordering)
+
+Training continues from `epoch + 1` as if it was never interrupted. This is useful for:
+- Recovering from crashes or Colab disconnects
+- Extending training beyond the original epoch count (set a higher `finetune.epochs`)
+- Checkpoints saved on interrupt (`_interrupted` suffix) work the same way
+
+**Note**: Resume and `pretrained_encoder` serve different purposes. Use `pretrained_encoder` to initialize a fresh fine-tuning run with SSL weights. Use `resume` to continue a previously started fine-tuning run from its exact state.
 
 ### Device selection
 
