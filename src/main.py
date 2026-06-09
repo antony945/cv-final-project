@@ -1,10 +1,10 @@
 """Entry point — Hydra-managed LeJEPA pre-training.
 
 Usage:
-    uv run python -m src.main                     # train with base config
-    uv run python -m src.main +experiment=test    # quick sanity test
-    uv run python -m src.main +experiment=local   # meaningful local run
-    uv run python -m src.main epochs=100 bs=32    # CLI overrides
+    uv run python -m src.main                              # train with base config
+    uv run python -m src.main +experiment=pretrain_test    # quick sanity test
+    uv run python -m src.main +experiment=pretrain_local   # meaningful local run
+    uv run python -m src.main epochs=100 bs=32             # CLI overrides
 
 Standalone scripts (no Hydra):
     uv run python -m src.verify                   # check dataset + forward pass

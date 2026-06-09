@@ -1,11 +1,20 @@
 # @package _global_
 # Meaningful local run — ~2h on MX450 / ~30 min on RTX 3060+
-# Usage: uv run python -m src.main +experiment=local
+# Usage: uv run python -m src.main +experiment=pretrain_local
+
+task: pretrain
+variant: xxs
+compile: true
+
+data:
+  dataset: nyu
+  n_samples: 5000
+  use_cache: false
+  use_mmap: true
 
 epochs: 200
 bs: 128
 lr: 2e-3 # full LR at paper-scale batch size (study how and if this should scale in relation to bs, in experiments i noted that 2e-3 works usually better than 5e-4 for every bs, but this needs more investigation)
-data:
-  n_samples: 5000
+
 ckpt_every: 10
 use_wandb: false

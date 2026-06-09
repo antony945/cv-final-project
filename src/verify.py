@@ -118,7 +118,7 @@ def run_verify(variant: str = "xxs", resolution: int = 128,
     print("  ALL CHECKS PASSED ✓")
     print(f"{'─' * 55}")
     print(f"\n  Ready to train! Run:")
-    print(f"    uv run python -m src.main +experiment=test")
+    print(f"    uv run python -m src.main +experiment=pretrain_test")
     print()
 
 

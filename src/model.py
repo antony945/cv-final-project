@@ -308,7 +308,10 @@ class METERDecoder(nn.Module):
         self.up3 = UpSampleBlock(up_chs[2][0], up_chs[2][1], up_chs[2][2])
 
         self.conv_out = nn.Conv2d(cfg["out_ch"], 1, kernel_size=3, padding=1,
-                                  bias=False)
+                                  bias=True)
+        # TODO: To check if is it necessary to initialize the bias of the last conv layer to 3.0 (mean NYU depth) or if it can be left as default (0.0), added this as we noticed that model outputs were stuck predicting near constant depth values
+        # Initialize bias to mean NYU depth (~3m) so output starts positive
+        nn.init.constant_(self.conv_out.bias, 3.0)
 
     def forward(self, x: torch.Tensor, skips: list[torch.Tensor],
                 target_size: tuple[int, int] | None = None) -> torch.Tensor:

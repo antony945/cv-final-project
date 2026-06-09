@@ -13,6 +13,7 @@ wheels/
 
 # Datasets
 datasets/nyu/**.tar
+datasets/**/**.npy
 
 # Outputs
 outputs/**

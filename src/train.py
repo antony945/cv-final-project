@@ -11,12 +11,13 @@ Follows the official LeJEPA minimal example structure:
 
 import logging
 import signal
+import sys
 import torch
 import warnings
 from pathlib import Path
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-import tqdm
+from tqdm.auto import tqdm
 from omegaconf import DictConfig
 
 log = logging.getLogger(__name__)
@@ -28,11 +29,48 @@ from src.data import get_pretrain_loader
 from src.visualize import visualize_pca_inline
 
 
+def _setup_torch_performance(device: str):
+    """Configure PyTorch for maximum training speed."""
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+
+
+def _get_amp_dtype(device: str) -> torch.dtype:
+    """Pick best mixed-precision dtype for the current GPU."""
+    if device != "cuda":
+        return torch.float32
+    cap = torch.cuda.get_device_capability()
+    # bfloat16 requires compute capability >= 8.0 (Ampere+)
+    if cap[0] >= 8:
+        return torch.bfloat16
+    # float16 works on all CUDA GPUs
+    return torch.float16
+
+
 def _resolve_device(cfg: DictConfig) -> str:
     """Resolve device from config: auto picks CUDA if available."""
     if cfg.device == "auto":
         return _AUTO_DEVICE
     return cfg.device
+
+
+def _save_full_checkpoint(path: Path, model, optimizer, scheduler,
+                          epoch: int, history: dict):
+    """Save a full-state checkpoint for seamless resume."""
+    state = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "history": history,
+        "rng_state": torch.random.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda_rng_state"] = torch.cuda.get_rng_state()
+    torch.save(state, path)
 
 
 def _init_wandb(cfg: DictConfig):
@@ -77,11 +115,16 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     log.info(f"LeJEPA Pre-training: MobileViT-{variant.upper()}")
     log.info(f"Epochs: {epochs} | BS: {cfg.bs} | lambda: {cfg.lamb} | Device: {device}")
 
+    _setup_torch_performance(device)
+    amp_dtype = _get_amp_dtype(device)
     wandb_active = _init_wandb(cfg)
 
     # ── Model, loss, optimizer ────────────────────────────────────────
     net = MobileViTLeJEPA(variant=variant, proj_dim=cfg.proj_dim,
                           resolution=cfg.resolution).to(device)
+    if cfg.get("compile", False) and device == "cuda" and sys.platform != "win32":
+        net = torch.compile(net, mode="reduce-overhead")
+        log.info("Model compiled with torch.compile (reduce-overhead mode).")
     sigreg = SIGReg().to(device)
 
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr,
@@ -96,7 +139,6 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=1e-3)
     scheduler = SequentialLR(opt, schedulers=[s1, s2], milestones=[warmup_steps])
 
-    scaler = GradScaler(enabled=(device == "cuda"))
     history = {"lejepa": [], "sigreg": [], "inv": []}
 
     # Suppress harmless SequentialLR deprecation warning from PyTorch internals
@@ -124,18 +166,17 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             net.train()
             ep_lejepa = ep_sig = ep_inv = 0.0
 
-            pbar = tqdm.tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+            pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
             for views, _ in pbar:
                 views = views.to(device, non_blocking=True)
 
-                with autocast(device, dtype=torch.bfloat16):
+                with autocast(device, dtype=amp_dtype):
                     _, proj = net(views)
                     loss, components = compute_lejepa_loss(proj, sigreg, cfg.lamb)
 
                 opt.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.step(opt)
-                scaler.update()
+                loss.backward()
+                opt.step()
                 scheduler.step()
 
                 ep_lejepa += components["lejepa"]
@@ -294,6 +335,9 @@ def finetune_depth(cfg: DictConfig) -> dict:
     log.info(f"METER Fine-tuning: MobileViT-{variant.upper()}")
     log.info(f"Resolution: {resolution} | Epochs: {epochs} | BS: {bs} | Device: {device}")
 
+    _setup_torch_performance(device)
+    amp_dtype = _get_amp_dtype(device)
+
     # ── Model ─────────────────────────────────────────────────────────
     model = METERModel(variant=variant, resolution=resolution).to(device)
 
@@ -334,111 +378,179 @@ def finetune_depth(cfg: DictConfig) -> dict:
     scheduler = torch.optim.lr_scheduler.StepLR(
         opt, step_size=ft_cfg.lr_step_size, gamma=ft_cfg.lr_gamma)
 
+    # ── Resume from checkpoint ─────────────────────────────────────────
+    start_epoch = 1
+    history = {"total": [], "depth": [], "grad": [], "norm": [], "ssim": []}
+    resume_path = ft_cfg.get("resume", None)
+    if resume_path:
+        from src.config import ROOT
+        rp = Path(resume_path)
+        if not rp.is_absolute():
+            rp = ROOT / rp
+        ckpt = torch.load(str(rp), map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        opt.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        history = ckpt.get("history", history)
+        if "rng_state" in ckpt:
+            torch.random.set_rng_state(ckpt["rng_state"])
+        if "cuda_rng_state" in ckpt and device == "cuda":
+            torch.cuda.set_rng_state(ckpt["cuda_rng_state"])
+        log.info(f"Resumed from epoch {ckpt['epoch']}, "
+                 f"lr={scheduler.get_last_lr()[0]:.6f}")
+
+    # ── Compile ────────────────────────────────────────────────────────
+    if cfg.get("compile", False) and device == "cuda" and sys.platform != "win32":
+        model = torch.compile(model, mode="reduce-overhead")
+        log.info("Model compiled with torch.compile (reduce-overhead mode).")
+
     # ── Data ──────────────────────────────────────────────────────────
     train_loader = get_depth_loader(cfg, device=device, split="train")
     val_every = ft_cfg.get("val_every", 5)
 
-    scaler = GradScaler(enabled=(device == "cuda"))
-    history = {"total": [], "depth": [], "grad": [], "norm": [], "ssim": []}
     best_metrics = {}
 
     # ── WandB ─────────────────────────────────────────────────────────
     wandb_active = _init_wandb(cfg) if cfg.get("use_wandb", False) else False
 
+    # ── Graceful interrupt handling ───────────────────────────────────
+    _stop_requested = False
+    _original_sigint = signal.getsignal(signal.SIGINT)
+
+    def _graceful_handler(signum, frame):
+        nonlocal _stop_requested
+        _stop_requested = True
+        log.info("Ctrl+C received — finishing current epoch. "
+                 "Press Ctrl+C again to force quit.")
+        signal.signal(signal.SIGINT, _original_sigint)
+
+    signal.signal(signal.SIGINT, _graceful_handler)
+    last_completed_epoch = start_epoch - 1
+
     # ── Training loop ─────────────────────────────────────────────────
-    for epoch in range(1, epochs + 1):
-        model.train()
-
-        # Unfreeze encoder after freeze period
-        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
-            for param in model.encoder.parameters():
-                param.requires_grad = True
-            # Re-create optimizer with all parameters
-            opt = torch.optim.AdamW(
-                model.parameters(), lr=ft_cfg.lr,
-                weight_decay=ft_cfg.weight_decay, betas=(0.9, 0.999))
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                opt, step_size=ft_cfg.lr_step_size, gamma=ft_cfg.lr_gamma)
-            log.info(f"Encoder unfrozen at epoch {epoch}.")
-
-        ep_losses = {k: 0.0 for k in history}
-        pbar = tqdm.tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
-
-        for rgb, depth_gt in pbar:
-            rgb = rgb.to(device, non_blocking=True)
-            depth_gt = depth_gt.to(device, non_blocking=True)
-
-            with autocast(device, dtype=torch.bfloat16):
-                depth_pred = model(rgb)
-                loss, components = criterion(depth_pred, depth_gt)
-
-            opt.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
-
-            for k in ep_losses:
-                ep_losses[k] += components[k]
-            pbar.set_postfix(loss=f"{components['total']:.4f}")
-
-            if wandb_active:
-                import wandb
-                wandb.log({f"train/{k}": v for k, v in components.items()})
-
-        # ── Epoch summary ─────────────────────────────────────────────
-        scheduler.step()
-        n = len(train_loader)
-        for k in history:
-            history[k].append(ep_losses[k] / n)
-
-        log.info(f"Epoch {epoch:>3} | loss={history['total'][-1]:.4f} "
-                 f"depth={history['depth'][-1]:.4f} "
-                 f"grad={history['grad'][-1]:.4f} "
-                 f"lr={scheduler.get_last_lr()[0]:.6f}")
-
-        # ── Live loss curves (overwritten each epoch) ─────────────
-        _plot_depth_loss_curves(history, variant)
-
-        # ── Checkpoint ────────────────────────────────────────────────
-        ckpt_every = cfg.get("ckpt_every", 10)
-        if epoch % ckpt_every == 0:
-            ckpt_dir = Path("checkpoints")
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            ckpt_path = ckpt_dir / f"meter_{variant}_epoch{epoch}.pth"
-            torch.save(model.state_dict(), ckpt_path)
-            log.info(f"Checkpoint saved: {ckpt_path}")
-
-            # Depth prediction visualization
-            from src.visualize import visualize_depth_inline
-            vis_path = visualize_depth_inline(
-                model, variant, epoch, out_dir="plots", device=device)
-            log.info(f"Depth visualization saved: {vis_path}")
+    try:
+        for epoch in range(start_epoch, epochs + 1):
             model.train()
 
-        # ── Validation ────────────────────────────────────────────────
-        if epoch % val_every == 0 or epoch == epochs:
-            metrics = _validate_depth(model, cfg, device)
-            log.info(f"  Val | d1={metrics['delta1']:.4f} "
-                     f"RMSE={metrics['rmse']:.4f} "
-                     f"REL={metrics['rel']:.4f}")
-            best_metrics = metrics
+            # Unfreeze encoder after freeze period
+            if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+                for param in model.encoder.parameters():
+                    param.requires_grad = True
+                # Re-create optimizer with all parameters
+                opt = torch.optim.AdamW(
+                    model.parameters(), lr=ft_cfg.lr,
+                    weight_decay=ft_cfg.weight_decay, betas=(0.9, 0.999))
+                scheduler = torch.optim.lr_scheduler.StepLR(
+                    opt, step_size=ft_cfg.lr_step_size, gamma=ft_cfg.lr_gamma)
+                log.info(f"Encoder unfrozen at epoch {epoch}.")
 
-            if wandb_active:
-                import wandb
-                wandb.log({f"val/{k}": v for k, v in metrics.items()})
+            ep_losses = {k: 0.0 for k in history}
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
 
-    # ── Save final model ──────────────────────────────────────────────
-    ckpt_dir = Path("checkpoints")
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    final_path = ckpt_dir / f"meter_{variant}_final.pth"
-    torch.save(model.state_dict(), final_path)
-    log.info(f"Final model saved: {final_path}")
+            for rgb, depth_gt in pbar:
+                rgb = rgb.to(device, non_blocking=True)
+                depth_gt = depth_gt.to(device, non_blocking=True)
 
-    # Final depth visualization
-    from src.visualize import visualize_depth_inline
-    vis_path = visualize_depth_inline(
-        model, variant, epochs, out_dir="plots", device=device)
-    log.info(f"Final depth visualization: {vis_path}")
+                with autocast(device, dtype=amp_dtype):
+                    depth_pred = model(rgb)
+                # Loss in float32 to avoid NaN from float16 overflow in Sobel/SSIM
+                loss, components = criterion(depth_pred.float(), depth_gt)
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+
+                for k in ep_losses:
+                    ep_losses[k] += components[k]
+                pbar.set_postfix(loss=f"{components['total']:.4f}")
+
+                if wandb_active:
+                    import wandb
+                    wandb.log({f"train/{k}": v for k, v in components.items()})
+
+            # ── Epoch summary ─────────────────────────────────────────────
+            scheduler.step()
+            n = len(train_loader)
+            for k in history:
+                history[k].append(ep_losses[k] / n)
+            last_completed_epoch = epoch
+
+            log.info(f"Epoch {epoch:>3} | loss={history['total'][-1]:.4f} "
+                     f"depth={history['depth'][-1]:.4f} "
+                     f"grad={history['grad'][-1]:.4f} "
+                     f"lr={scheduler.get_last_lr()[0]:.6f}")
+
+            # ── Live loss curves (overwritten each epoch) ─────────────
+            _plot_depth_loss_curves(history, variant)
+
+            # ── Checkpoint ────────────────────────────────────────────────
+            ckpt_every = cfg.get("ckpt_every", 10)
+            if epoch % ckpt_every == 0:
+                ckpt_dir = Path("checkpoints")
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                ckpt_path = ckpt_dir / f"meter_{variant}_epoch{epoch}.pth"
+                _save_full_checkpoint(ckpt_path, model, opt, scheduler,
+                                     epoch, history)
+                log.info(f"Checkpoint saved: {ckpt_path}")
+
+                # Depth prediction visualization
+                from src.visualize import visualize_depth_inline
+                vis_path = visualize_depth_inline(
+                    model, variant, epoch, out_dir="plots", device=device)
+                log.info(f"Depth visualization saved: {vis_path}")
+                model.train()
+
+            # ── Validation ────────────────────────────────────────────────
+            if epoch % val_every == 0 or epoch == epochs:
+                metrics = _validate_depth(model, cfg, device)
+                log.info(f"  Val | d1={metrics['delta1']:.4f} "
+                         f"RMSE={metrics['rmse']:.4f} "
+                         f"REL={metrics['rel']:.4f}")
+                best_metrics = metrics
+
+                if wandb_active:
+                    import wandb
+                    wandb.log({f"val/{k}": v for k, v in metrics.items()})
+
+            # ── Check graceful stop ───────────────────────────────────
+            if _stop_requested:
+                log.info(f"Graceful stop after epoch {epoch}/{epochs}")
+                ckpt_dir = Path("checkpoints")
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                stop_path = ckpt_dir / f"meter_{variant}_interrupted_epoch{epoch}.pth"
+                _save_full_checkpoint(stop_path, model, opt, scheduler,
+                                     epoch, history)
+                log.info(f"Interrupted checkpoint saved: {stop_path}")
+                break
+
+    except KeyboardInterrupt:
+        log.warning(f"Force interrupted during epoch {last_completed_epoch + 1}")
+        if last_completed_epoch > 0:
+            ckpt_dir = Path("checkpoints")
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            stop_path = ckpt_dir / f"meter_{variant}_interrupted_epoch{last_completed_epoch}.pth"
+            _save_full_checkpoint(stop_path, model, opt, scheduler,
+                                 last_completed_epoch, history)
+            log.info(f"Best-effort checkpoint saved: {stop_path}")
+
+    finally:
+        signal.signal(signal.SIGINT, _original_sigint)
+
+    # ── Save final model (if completed normally) ──────────────────────
+    if not _stop_requested and last_completed_epoch == epochs:
+        ckpt_dir = Path("checkpoints")
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        final_path = ckpt_dir / f"meter_{variant}_final.pth"
+        _save_full_checkpoint(final_path, model, opt, scheduler,
+                              epochs, history)
+        log.info(f"Final model saved: {final_path}")
+
+        # Final depth visualization
+        from src.visualize import visualize_depth_inline
+        vis_path = visualize_depth_inline(
+            model, variant, epochs, out_dir="plots", device=device)
+        log.info(f"Final depth visualization: {vis_path}")
 
     if wandb_active:
         import wandb

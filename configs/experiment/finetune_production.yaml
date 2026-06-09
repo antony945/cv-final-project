@@ -1,6 +1,6 @@
 # @package _global_
-# Quick fine-tuning sanity test — ~2 min on any hardware
-# Usage: uv run python -m src.main +experiment=finetune_test
+# Full METER fine-tuning on NYU Depth V2
+# Usage: uv run python -m src.main +experiment=finetune_production
 
 task: finetune
 variant: xxs
@@ -8,14 +8,14 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 100
+  n_samples: 47584 # full NYU training set
   use_cache: false
   use_mmap: true
 
 finetune:
   resolution: [192, 256]
-  epochs: 2
-  bs: 16
+  epochs: 60
+  bs: 128
   lr: 0.001
   weight_decay: 0.01
   lr_step_size: 20
@@ -24,8 +24,8 @@ finetune:
   lamb2: 1.0
   lamb3: 1.0
   freeze_encoder_epochs: 0
-  pretrained_encoder: null
-  val_every: 2
+  pretrained_encoder: null # set to checkpoint path for transfer
+  val_every: 5
 
-ckpt_every: 2
-use_wandb: false
+ckpt_every: 5
+use_wandb: true
