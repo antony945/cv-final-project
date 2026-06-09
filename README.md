@@ -2,6 +2,8 @@
 
 Self-supervised pre-training (LeJEPA/SIGReg) + supervised fine-tuning (METER decoder) for monocular depth estimation on NYU Depth V2, using lightweight MobileViT encoder variants.
 
+[nyu kaggle](https://www.kaggle.com/datasets/awsaf49/nyuv2-official-split-dataset/data)
+
 ## Setup
 
 ### 1. Clone and enter the repository
