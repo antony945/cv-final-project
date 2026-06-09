@@ -18,6 +18,7 @@ data:
   n_samples: 1000 # images to load (max ~47584 for NYU)
   use_cache: false # use pre-processed .pt tensor cache (faster loading)
   cache_dir: null # cache directory (null = datasets/nyu_cache)
+  use_mmap: false # use memory-mapped .npy files (run src.preprocess first)
 
 # ── LeJEPA Pre-training ────────────────────────────────────────────────
 epochs: 50
@@ -45,6 +46,7 @@ finetune:
   lamb3: 1.0 # SSIM loss weight
   freeze_encoder_epochs: 0 # 0 = train end-to-end from start
   pretrained_encoder: null # path to LeJEPA checkpoint (optional)
+  resume: null # path to full checkpoint for resume training
   val_every: 5 # validate every N epochs
 
 # ── Experiment tracking ────────────────────────────────────────────────

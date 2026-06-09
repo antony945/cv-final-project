@@ -258,10 +258,48 @@ def _load_val_samples(n_images: int, resolution: tuple[int, int] = VIS_RES):
     """Load first N samples from NYU validation (RGB + depth GT).
 
     Always returns the same images for reproducibility across epochs.
+    Uses mmap files if available, otherwise falls back to tar/h5 or HuggingFace.
     """
-    from src.config import HF_TOKEN, HF_OFFLINE, get_nyu_dataset_path
+    from src.config import HF_TOKEN, HF_OFFLINE, get_nyu_dataset_path, get_nyu_mmap_dir, ROOT
+    from src.data import _mmap_files_exist
+    from pathlib import Path
     import os
 
+    H, W = resolution
+
+    # Try mmap first (fastest, consistent with training)
+    if _mmap_files_exist(resolution, "val"):
+        mmap_dir = get_nyu_mmap_dir()
+        p = Path(mmap_dir)
+        if not p.is_absolute():
+            p = ROOT / p
+        rgb_mmap = np.load(str(p / f"nyu_val_rgb_{H}x{W}.npy"), mmap_mode="r")
+        depth_mmap = np.load(str(p / f"nyu_val_depth_{H}x{W}.npy"), mmap_mode="r")
+
+        rgb_tensors = []
+        depth_tensors = []
+        rgb_display = []
+
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+
+        for i in range(min(n_images, rgb_mmap.shape[0])):
+            rgb_np = np.array(rgb_mmap[i])        # (H, W, 3) uint8
+            depth_np = np.array(depth_mmap[i])    # (H, W) float32
+
+            rgb_display.append(rgb_np.astype(np.float32) / 255.0)
+
+            # Normalize for model input
+            rgb_f = rgb_np.astype(np.float32) / 255.0
+            rgb_f = (rgb_f - mean) / std
+            rgb_tensors.append(torch.from_numpy(rgb_f.transpose(2, 0, 1)).float())
+            depth_tensors.append(torch.from_numpy(depth_np).unsqueeze(0))
+
+        rgb_batch = torch.stack(rgb_tensors)
+        depth_batch = torch.stack(depth_tensors)
+        return rgb_batch, depth_batch, rgb_display
+
+    # Fallback: load from tar/h5 or HuggingFace
     nyu_path = get_nyu_dataset_path()
     if nyu_path:
         from src.data import _load_nyu_local

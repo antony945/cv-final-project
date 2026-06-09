@@ -57,6 +57,22 @@ def _resolve_device(cfg: DictConfig) -> str:
     return cfg.device
 
 
+def _save_full_checkpoint(path: Path, model, optimizer, scheduler,
+                          epoch: int, history: dict):
+    """Save a full-state checkpoint for seamless resume."""
+    state = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "history": history,
+        "rng_state": torch.random.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda_rng_state"] = torch.cuda.get_rng_state()
+    torch.save(state, path)
+
+
 def _init_wandb(cfg: DictConfig):
     """Initialize wandb if enabled. Returns True if active."""
     if not cfg.use_wandb:
@@ -362,6 +378,28 @@ def finetune_depth(cfg: DictConfig) -> dict:
     scheduler = torch.optim.lr_scheduler.StepLR(
         opt, step_size=ft_cfg.lr_step_size, gamma=ft_cfg.lr_gamma)
 
+    # ── Resume from checkpoint ─────────────────────────────────────────
+    start_epoch = 1
+    history = {"total": [], "depth": [], "grad": [], "norm": [], "ssim": []}
+    resume_path = ft_cfg.get("resume", None)
+    if resume_path:
+        from src.config import ROOT
+        rp = Path(resume_path)
+        if not rp.is_absolute():
+            rp = ROOT / rp
+        ckpt = torch.load(str(rp), map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        opt.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        history = ckpt.get("history", history)
+        if "rng_state" in ckpt:
+            torch.random.set_rng_state(ckpt["rng_state"])
+        if "cuda_rng_state" in ckpt and device == "cuda":
+            torch.cuda.set_rng_state(ckpt["cuda_rng_state"])
+        log.info(f"Resumed from epoch {ckpt['epoch']}, "
+                 f"lr={scheduler.get_last_lr()[0]:.6f}")
+
     # ── Compile ────────────────────────────────────────────────────────
     if cfg.get("compile", False) and device == "cuda" and sys.platform != "win32":
         model = torch.compile(model, mode="reduce-overhead")
@@ -371,7 +409,6 @@ def finetune_depth(cfg: DictConfig) -> dict:
     train_loader = get_depth_loader(cfg, device=device, split="train")
     val_every = ft_cfg.get("val_every", 5)
 
-    history = {"total": [], "depth": [], "grad": [], "norm": [], "ssim": []}
     best_metrics = {}
 
     # ── WandB ─────────────────────────────────────────────────────────
@@ -389,11 +426,11 @@ def finetune_depth(cfg: DictConfig) -> dict:
         signal.signal(signal.SIGINT, _original_sigint)
 
     signal.signal(signal.SIGINT, _graceful_handler)
-    last_completed_epoch = 0
+    last_completed_epoch = start_epoch - 1
 
     # ── Training loop ─────────────────────────────────────────────────
     try:
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start_epoch, epochs + 1):
             model.train()
 
             # Unfreeze encoder after freeze period
@@ -453,7 +490,8 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 ckpt_dir = Path("checkpoints")
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
                 ckpt_path = ckpt_dir / f"meter_{variant}_epoch{epoch}.pth"
-                torch.save(model.state_dict(), ckpt_path)
+                _save_full_checkpoint(ckpt_path, model, opt, scheduler,
+                                     epoch, history)
                 log.info(f"Checkpoint saved: {ckpt_path}")
 
                 # Depth prediction visualization
@@ -481,7 +519,8 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 ckpt_dir = Path("checkpoints")
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
                 stop_path = ckpt_dir / f"meter_{variant}_interrupted_epoch{epoch}.pth"
-                torch.save(model.state_dict(), stop_path)
+                _save_full_checkpoint(stop_path, model, opt, scheduler,
+                                     epoch, history)
                 log.info(f"Interrupted checkpoint saved: {stop_path}")
                 break
 
@@ -491,7 +530,8 @@ def finetune_depth(cfg: DictConfig) -> dict:
             ckpt_dir = Path("checkpoints")
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             stop_path = ckpt_dir / f"meter_{variant}_interrupted_epoch{last_completed_epoch}.pth"
-            torch.save(model.state_dict(), stop_path)
+            _save_full_checkpoint(stop_path, model, opt, scheduler,
+                                 last_completed_epoch, history)
             log.info(f"Best-effort checkpoint saved: {stop_path}")
 
     finally:
@@ -502,7 +542,8 @@ def finetune_depth(cfg: DictConfig) -> dict:
         ckpt_dir = Path("checkpoints")
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         final_path = ckpt_dir / f"meter_{variant}_final.pth"
-        torch.save(model.state_dict(), final_path)
+        _save_full_checkpoint(final_path, model, opt, scheduler,
+                              epochs, history)
         log.info(f"Final model saved: {final_path}")
 
         # Final depth visualization

@@ -20,6 +20,7 @@ import tarfile
 import h5py
 import numpy as np
 import torch
+import tqdm
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import v2
@@ -249,11 +250,11 @@ def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False,
         if len(results) >= n_samples:
             break
         with tarfile.open(tar_path, "r") as tf:
-            for member in tf:
-                if len(results) >= n_samples:
-                    break
-                if not member.name.endswith(".h5"):
-                    continue
+            members = [m for m in tf if m.name.endswith(".h5")]
+            cap = min(len(members), n_samples - len(results))
+            for member in tqdm.tqdm(members[:cap],
+                                    desc=f"  Loading {Path(tar_path).name}",
+                                    unit="img"):
                 f = tf.extractfile(member)
                 if f is None:
                     continue
@@ -304,6 +305,8 @@ def _load_nyu_hf(n_samples: int, include_depth: bool = False,
     )
 
     results = []
+    pbar = tqdm.tqdm(total=n_samples, desc=f"  Loading NYU {hf_split} (HF)",
+                     unit="img")
     for i, row in enumerate(stream):
         if i >= n_samples:
             break
@@ -313,6 +316,8 @@ def _load_nyu_hf(n_samples: int, include_depth: bool = False,
             results.append((rgb_pil, depth))
         else:
             results.append(rgb_pil)
+        pbar.update(1)
+    pbar.close()
 
     log.info(f"Loaded {len(results)} NYU samples from HuggingFace.")
     return results
@@ -490,6 +495,89 @@ class CachedNYUDepthDataset(Dataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  NYU Depth V2 — Memory-Mapped Dataset (zero RAM overhead)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class MmapNYUDepthDataset(Dataset):
+    """NYU Depth V2 using memory-mapped .npy files for near-zero RAM usage.
+
+    Requires preprocessing via `uv run python -m src.preprocess`.
+    Files expected:
+      {mmap_dir}/nyu_{split}_rgb_{H}x{W}.npy   → (N, H, W, 3) uint8
+      {mmap_dir}/nyu_{split}_depth_{H}x{W}.npy → (N, H, W) float32
+
+    The OS pages in only the accessed samples — supports 45k+ samples
+    with effectively zero RAM overhead beyond the current batch.
+    """
+
+    def __init__(self, n_samples: int, resolution: tuple[int, int] | int = (192, 256),
+                 train: bool = True, augment: bool = True, split: str = "train"):
+        from pathlib import Path
+        from src.config import ROOT, get_nyu_mmap_dir
+
+        self.train = train
+        self.augment = augment and train
+        if isinstance(resolution, int):
+            resolution = (resolution, resolution)
+        self.resolution = resolution
+        h, w = resolution
+
+        # Resolve mmap directory
+        mmap_dir = get_nyu_mmap_dir()
+        p = Path(mmap_dir)
+        if not p.is_absolute():
+            p = ROOT / p
+
+        rgb_path = p / f"nyu_{split}_rgb_{h}x{w}.npy"
+        depth_path = p / f"nyu_{split}_depth_{h}x{w}.npy"
+
+        if not rgb_path.exists() or not depth_path.exists():
+            raise FileNotFoundError(
+                f"Memory-mapped files not found at {p}. "
+                f"Run preprocessing first:\n"
+                f"  uv run python -m src.preprocess {h} {w}"
+            )
+
+        # Open as memory-mapped (read-only)
+        self._rgb = np.load(str(rgb_path), mmap_mode="r")    # (N, H, W, 3)
+        self._depth = np.load(str(depth_path), mmap_mode="r")  # (N, H, W)
+
+        # Cap to n_samples
+        total = self._rgb.shape[0]
+        self._n = min(n_samples, total)
+
+        # ImageNet normalization constants
+        self._mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        self._std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+        log.info(f"{self._n}/{total} mmap depth samples loaded "
+                 f"({'train' if train else 'val'}, {h}x{w}).")
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # Read from mmap (triggers OS page-in for this sample only)
+        rgb_np = np.array(self._rgb[idx])      # (H, W, 3) uint8 — copy from mmap
+        depth_np = np.array(self._depth[idx])   # (H, W) float32 — copy from mmap
+
+        # Apply METER augmentation (numpy-level)
+        if self.augment:
+            rgb_np, depth_np = _meter_augmentation(
+                rgb_np, depth_np)
+            # _meter_augmentation returns rgb as uint8
+
+        # Convert to tensors
+        rgb = torch.from_numpy(rgb_np.copy()).permute(2, 0, 1).float() / 255.0  # (3, H, W)
+        depth = torch.from_numpy(depth_np.copy()).unsqueeze(0)  # (1, H, W)
+
+        # Normalize RGB
+        rgb = (rgb - self._mean) / self._std
+        return rgb, depth
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  KITTI — Stub (TO IMPLEMENT)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -567,6 +655,25 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
     )
 
 
+def _mmap_files_exist(resolution: tuple[int, int] | int, split: str) -> bool:
+    """Check if preprocessed memory-mapped .npy files exist for given resolution."""
+    from pathlib import Path
+    from src.config import ROOT, get_nyu_mmap_dir
+
+    if isinstance(resolution, int):
+        resolution = (resolution, resolution)
+    h, w = resolution
+
+    mmap_dir = get_nyu_mmap_dir()
+    p = Path(mmap_dir)
+    if not p.is_absolute():
+        p = ROOT / p
+
+    rgb_path = p / f"nyu_{split}_rgb_{h}x{w}.npy"
+    depth_path = p / f"nyu_{split}_depth_{h}x{w}.npy"
+    return rgb_path.exists() and depth_path.exists()
+
+
 def get_depth_loader(cfg: DictConfig, device: str | None = None,
                      split: str = "train") -> DataLoader:
     """Build the depth fine-tuning DataLoader from config.
@@ -597,9 +704,18 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
     batch_size = cfg.get("finetune", {}).get("bs", cfg.get("bs", 8))
     is_train = (split == "train")
 
-    # Use cached .pt dataset if configured (much faster loading)
+    # Dataset selection priority:
+    # 1. Memory-mapped .npy files (fastest, zero RAM overhead)
+    # 2. Cached .pt tensors (fast, one file per sample)
+    # 3. Load from tar/h5 into RAM (slowest, high RAM)
+    use_mmap = cfg.get("data", {}).get("use_mmap", False)
     use_cache = cfg.get("data", {}).get("use_cache", False)
-    if use_cache and dataset_name == "nyu":
+
+    if use_mmap and dataset_name == "nyu" and _mmap_files_exist(resolution, split):
+        ds = MmapNYUDepthDataset(
+            n_samples=n_samples, resolution=resolution,
+            train=is_train, augment=is_train, split=split)
+    elif use_cache and dataset_name == "nyu":
         cache_dir = cfg.get("data", {}).get("cache_dir", None)
         ds = CachedNYUDepthDataset(
             n_samples=n_samples, resolution=resolution,

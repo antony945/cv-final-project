@@ -4,17 +4,18 @@
 
 task: finetune
 variant: xxs
-compile: true
+compile: false
 
 data:
   dataset: nyu
-  n_samples: 1000
+  n_samples: 4000
   use_cache: false
+  use_mmap: true
 
 finetune:
   resolution: [192, 256]
   epochs: 60
-  bs: 16
+  bs: 64
   lr: 0.005
   weight_decay: 0.01
   lr_step_size: 30
@@ -24,7 +25,8 @@ finetune:
   lamb3: 1.0
   freeze_encoder_epochs: 0
   pretrained_encoder: null
+  resume: null
   val_every: 10
 
-ckpt_every: 5
+ckpt_every: 10
 use_wandb: false
