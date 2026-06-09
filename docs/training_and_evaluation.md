@@ -63,13 +63,13 @@ Multi-view augmentation for contrastive learning:
 
 ```bash
 # Quick sanity test (~2 min)
-uv run python -m src.main +experiment=test
+uv run python -m src.main +experiment=pretrain_test
 
 # Local GPU training
-uv run python -m src.main +experiment=local
+uv run python -m src.main +experiment=pretrain_local
 
 # Production (full dataset)
-uv run python -m src.main +experiment=production
+uv run python -m src.main +experiment=pretrain_production
 
 # Custom overrides
 uv run python -m src.main epochs=100 bs=32 data.n_samples=5000
@@ -184,17 +184,17 @@ Applied only during training (p=0.5 each):
 uv run python -m src.main +experiment=finetune_test
 
 # Full METER fine-tuning (NYU, 60 epochs)
-uv run python -m src.main +experiment=finetune_nyu
+uv run python -m src.main +experiment=finetune_production
 
 # With pre-trained encoder
-uv run python -m src.main +experiment=finetune_nyu \
+uv run python -m src.main +experiment=finetune_production \
     finetune.pretrained_encoder=outputs/pretrain/xxs_2026-06-05/checkpoints/lejepa_xxs_final.pth
 
 # Custom overrides
-uv run python -m src.main +experiment=finetune_nyu finetune.epochs=30 finetune.bs=64
+uv run python -m src.main +experiment=finetune_production finetune.epochs=30 finetune.bs=64
 
 # Different variant
-uv run python -m src.main +experiment=finetune_nyu variant=xs
+uv run python -m src.main +experiment=finetune_production variant=xs
 ```
 
 ---

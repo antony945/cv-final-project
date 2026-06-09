@@ -67,48 +67,60 @@ uv run python -m src.preprocess
 
 # Explicit resolution (height width)
 uv run python -m src.preprocess 192 256
+
+# Force rebuild even if files already exist
+uv run python -m src.preprocess --force
 ```
 
-This reads all tar/h5 shards from `NYU_DATASET_PATH` (or streams from HuggingFace if not set), resizes every image, and writes two files per split:
+The preprocessor uses a **streaming + parallel** architecture:
+- Samples are read one-at-a-time from tar/h5 shards (never loaded all at once into RAM)
+- Resize operations are parallelized across multiple CPU workers (~190 img/s on 8 cores)
+- Results are written directly into pre-allocated memory-mapped files
+- Peak RAM usage stays under **1 GB** regardless of dataset size
+
+Output files include the sample count in the filename for incremental processing:
 
 ```
 datasets/nyu_mmap/
-├── nyu_train_rgb_192x256.npy    # (N, 192, 256, 3) uint8  — ~3.4 GB for 45k
-├── nyu_train_depth_192x256.npy  # (N, 192, 256)    float32 — ~3.5 GB for 45k
-├── nyu_val_rgb_192x256.npy      # (654, 192, 256, 3) uint8
-└── nyu_val_depth_192x256.npy    # (654, 192, 256)    float32
+├── nyu_train_rgb_192x256_N12881.npy    # (12881, 192, 256, 3) uint8
+├── nyu_train_depth_192x256_N12881.npy  # (12881, 192, 256)    float32
+├── nyu_val_rgb_192x256_N654.npy        # (654, 192, 256, 3)   uint8
+└── nyu_val_depth_192x256_N654.npy      # (654, 192, 256)      float32
 ```
 
-Total disk: **~7 GB** for the full NYU dataset (train + val).
+Total disk: **~4.3 GB** for the full NYU dataset (train + val). Processing time: ~75 seconds.
 
 The output directory is controlled by `NYU_MMAP_DIR` in `.env` (defaults to `datasets/nyu_mmap`).
 
+### Incremental behavior
+
+Re-running `uv run python -m src.preprocess` is safe and fast:
+- If mmap files exist with the correct sample count → **skipped** (instant)
+- If sample count differs (e.g., new tar shards added) → **rebuilt** automatically
+- Use `--force` to rebuild unconditionally
+
 ### Auto-detection
 
-Once preprocessed, the training pipeline **automatically detects** the mmap files and uses them — no config changes needed. The priority order is:
-
-1. Memory-mapped `.npy` files exist → use them (fastest, zero RAM)
-2. `data.use_cache: true` in config → use per-sample `.pt` cache
-3. Neither → load from tar/h5 into RAM (default for small runs)
+Once preprocessed, the training pipeline **automatically detects** the mmap files via glob pattern matching and uses them. The loader supports both old (`nyu_train_rgb_192x256.npy`) and new (`nyu_train_rgb_192x256_N12881.npy`) filename formats. All experiment configs have `data.use_mmap: true` enabled by default.
 
 You can verify the files were created correctly:
 
 ```bash
 uv run python -c "
 import numpy as np
-rgb = np.load('datasets/nyu_mmap/nyu_train_rgb_192x256.npy', mmap_mode='r')
-depth = np.load('datasets/nyu_mmap/nyu_train_depth_192x256.npy', mmap_mode='r')
+from src.data import _find_mmap_file
+rgb_path = _find_mmap_file('train', 'rgb', 192, 256)
+rgb = np.load(str(rgb_path), mmap_mode='r')
 print(f'RGB: {rgb.shape} {rgb.dtype}')    # (N, 192, 256, 3) uint8
-print(f'Depth: {depth.shape} {depth.dtype}')  # (N, 192, 256) float32
 "
 ```
 
 ### Training with the full dataset
 
-After preprocessing, you can train on all 45k samples with minimal RAM:
+After preprocessing, you can train on all samples with minimal RAM:
 
 ```bash
-uv run python -m src.main +experiment=finetune_small data.n_samples=45000
+uv run python -m src.main +experiment=finetune_production
 ```
 
 ## Training
@@ -121,19 +133,19 @@ Trains the encoder with self-supervised SIGReg loss on unlabeled RGB images.
 
 ```bash
 # Quick sanity test (~2 min)
-uv run python -m src.main +experiment=test
+uv run python -m src.main +experiment=pretrain_test
 
 # Meaningful local run (~2h on MX450)
-uv run python -m src.main +experiment=local
+uv run python -m src.main +experiment=pretrain_local
 
-# Full production run (~6h on T4)
-uv run python -m src.main +experiment=production
+# Full production run (~2h on A100)
+uv run python -m src.main +experiment=pretrain_production
 
 # CLI overrides
-uv run python -m src.main +experiment=local epochs=100 bs=8
+uv run python -m src.main +experiment=pretrain_local epochs=100 bs=8
 
 # Force CPU (default: auto-detects CUDA)
-uv run python -m src.main +experiment=test device=cpu
+uv run python -m src.main +experiment=pretrain_test device=cpu
 ```
 
 ### Fine-tuning (METER Depth)
@@ -145,10 +157,10 @@ Trains encoder + decoder for monocular depth prediction with Balanced Loss Funct
 uv run python -m src.main +experiment=finetune_test
 
 # Full METER training on NYU (60 epochs, bs=128)
-uv run python -m src.main +experiment=finetune_nyu
+uv run python -m src.main +experiment=finetune_production
 
 # Custom variant
-uv run python -m src.main +experiment=finetune_nyu variant=xs
+uv run python -m src.main +experiment=finetune_production variant=xs
 ```
 
 #### Using a pre-trained LeJEPA encoder
@@ -156,7 +168,7 @@ uv run python -m src.main +experiment=finetune_nyu variant=xs
 After pre-training with LeJEPA/SIGReg, you can initialize the METER encoder with those weights instead of training from scratch:
 
 ```bash
-uv run python -m src.main +experiment=finetune_nyu \
+uv run python -m src.main +experiment=finetune_production \
     finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
 ```
 
@@ -167,7 +179,7 @@ The encoder weights are loaded from the LeJEPA checkpoint and used as the starti
 When using a pre-trained encoder, you can optionally **freeze** it for the first N epochs so only the decoder trains initially:
 
 ```bash
-uv run python -m src.main +experiment=finetune_nyu \
+uv run python -m src.main +experiment=finetune_production \
     finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth \
     finetune.freeze_encoder_epochs=10
 ```
@@ -198,7 +210,7 @@ After epoch N, the encoder is automatically unfrozen and the optimizer is re-cre
 Fine-tuning saves **full-state checkpoints** (model + optimizer + scheduler + epoch + loss history + RNG state) at regular intervals and on interrupt. To resume from where training stopped:
 
 ```bash
-uv run python -m src.main +experiment=finetune_nyu \
+uv run python -m src.main +experiment=finetune_production \
     finetune.resume=outputs/finetune/xxs_2026-06-08_21-09-28/checkpoints/meter_xxs_epoch10.pth
 ```
 
@@ -295,12 +307,14 @@ Outputs:
 
 | Config | Task | Use case |
 |--------|------|----------|
-| `+experiment=test` | pretrain | 5 epochs, 100 samples — CI/sanity check |
-| `+experiment=local` | pretrain | 50 epochs, 5k samples — local GPU |
-| `+experiment=production` | pretrain | 200 epochs, full dataset — Colab T4 |
-| `+experiment=production_a100` | pretrain | 200 epochs, BS=256 — A100 |
+| `+experiment=pretrain_test` | pretrain | 40 epochs, 100 samples — sanity check |
+| `+experiment=pretrain_local` | pretrain | 200 epochs, 5k samples — local GPU |
+| `+experiment=pretrain_production` | pretrain | 200 epochs, full dataset, BS=256 — A100 |
 | `+experiment=finetune_test` | finetune | 2 epochs, 50 samples — sanity check |
-| `+experiment=finetune_nyu` | finetune | 60 epochs, full NYU — production |
+| `+experiment=finetune_local` | finetune | 60 epochs, 10k samples — local GPU |
+| `+experiment=finetune_production` | finetune | 60 epochs, full NYU — production |
+
+All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: false` by default.
 
 ## Project structure
 

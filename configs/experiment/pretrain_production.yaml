@@ -1,0 +1,20 @@
+# @package _global_
+# Full production run — ~2h on A100
+# Usage: uv run python -m src.main +experiment=pretrain_production
+
+task: pretrain
+variant: xxs
+compile: true
+
+data:
+  dataset: nyu
+  n_samples: 47584 # full NYU Depth V2 train set
+  use_cache: false
+  use_mmap: true
+
+epochs: 200
+bs: 256
+lr: 2e-3 # full LR at paper-scale batch size
+
+ckpt_every: 25
+use_wandb: true

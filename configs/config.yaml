@@ -1,6 +1,6 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LeJEPA Pre-training — Base Configuration
-#  Override with: +experiment=test, +experiment=local, etc.
+#  Override with: +experiment=pretrain_test, +experiment=pretrain_local, etc.
 #  CLI overrides: uv run python -m src.main epochs=100 bs=32
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

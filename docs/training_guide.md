@@ -13,12 +13,12 @@ All hyperparameters are managed via Hydra YAML configs in `configs/`. The base c
 uv run python -m src.main
 
 # Use a named experiment profile
-uv run python -m src.main +experiment=test
-uv run python -m src.main +experiment=local
-uv run python -m src.main +experiment=production
+uv run python -m src.main +experiment=pretrain_test
+uv run python -m src.main +experiment=pretrain_local
+uv run python -m src.main +experiment=pretrain_production
 
 # Override any parameter from CLI
-uv run python -m src.main +experiment=local epochs=100 bs=8
+uv run python -m src.main +experiment=pretrain_local epochs=100 bs=8
 ```
 
 ---
