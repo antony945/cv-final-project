@@ -8,7 +8,7 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 47584 # full NYU training set
+  n_samples: 50000 # 47584 full NYU training set
   use_cache: false
   use_mmap: true
 

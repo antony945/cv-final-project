@@ -8,7 +8,7 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 50000 # or put 50000 for the full NYU Depth V2 train set
+  n_samples: 50000 # 47584 full NYU Depth V2 train set
   use_cache: false
   use_mmap: true
 

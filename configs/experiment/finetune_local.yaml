@@ -27,4 +27,4 @@ finetune:
   pretrained_encoder: null
 
 ckpt_every: 5
-use_wandb: false
+use_wandb: true
