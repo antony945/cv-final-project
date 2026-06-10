@@ -84,28 +84,44 @@ def visualize_pca(checkpoint: str | Path, variant: str | None = None,
 
     backbone = _load_backbone(checkpoint, variant, resolution)
     transform = _get_vis_transform(resolution)
-
-    if HF_OFFLINE:
-        os.environ["HF_DATASETS_OFFLINE"] = "1"
-        print(f"Loading {n_images} NYU images from local cache (offline)...")
-    else:
-        os.environ.pop("HF_DATASETS_OFFLINE", None)
-        print(f"Loading {n_images} NYU images for visualization...")
-    ds = load_dataset("sayakpaul/nyu_depth_v2", split="validation",
-                      streaming=True, trust_remote_code=True, token=HF_TOKEN)
-
-    # Prepare batch
-    imgs = []
-    rgb_display = []
     H, W = resolution
-    for i, row in enumerate(ds):
-        if i >= n_images:
-            break
-        img = row["image"].convert("RGB")
-        imgs.append(transform(img))
-        rgb_display.append(
-            np.array(img.resize((W, H))) / 255.0
-        )
+
+    # Try mmap first (fastest, consistent with training)
+    from src.data import _mmap_files_exist, _find_mmap_file
+    if _mmap_files_exist(resolution, "val"):
+        print(f"Loading {n_images} NYU images from mmap...")
+        rgb_path = _find_mmap_file("val", "rgb", H, W)
+        rgb_mmap = np.load(str(rgb_path), mmap_mode="r")
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        imgs = []
+        rgb_display = []
+        for i in range(min(n_images, rgb_mmap.shape[0])):
+            rgb_np = np.array(rgb_mmap[i])  # (H, W, 3) uint8
+            rgb_display.append(rgb_np.astype(np.float32) / 255.0)
+            rgb_f = rgb_np.astype(np.float32) / 255.0
+            rgb_f = (rgb_f - mean) / std
+            imgs.append(torch.from_numpy(rgb_f.transpose(2, 0, 1)).float())
+    else:
+        # Fallback: HuggingFace streaming
+        if HF_OFFLINE:
+            os.environ["HF_DATASETS_OFFLINE"] = "1"
+            print(f"Loading {n_images} NYU images from local cache (offline)...")
+        else:
+            os.environ.pop("HF_DATASETS_OFFLINE", None)
+            print(f"Loading {n_images} NYU images for visualization...")
+        ds = load_dataset("sayakpaul/nyu_depth_v2", split="validation",
+                          streaming=True, trust_remote_code=True, token=HF_TOKEN)
+        imgs = []
+        rgb_display = []
+        for i, row in enumerate(ds):
+            if i >= n_images:
+                break
+            img = row["image"].convert("RGB")
+            imgs.append(transform(img))
+            rgb_display.append(
+                np.array(img.resize((W, H))) / 255.0
+            )
     batch = torch.stack(imgs).to(DEVICE)
 
     # Extract features
@@ -185,24 +201,39 @@ def visualize_pca_inline(state_dict: dict, variant: str, epoch: int,
     transform = _get_vis_transform(resolution)
     H, W = resolution
 
-    if HF_OFFLINE:
-        os.environ["HF_DATASETS_OFFLINE"] = "1"
+    # Try mmap first (fastest, consistent with training)
+    from src.data import _mmap_files_exist, _find_mmap_file
+    if _mmap_files_exist(resolution, "val"):
+        rgb_path = _find_mmap_file("val", "rgb", H, W)
+        rgb_mmap = np.load(str(rgb_path), mmap_mode="r")
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        imgs = []
+        rgb_display = []
+        for i in range(min(n_images, rgb_mmap.shape[0])):
+            rgb_np = np.array(rgb_mmap[i])  # (H, W, 3) uint8
+            rgb_display.append(rgb_np.astype(np.float32) / 255.0)
+            rgb_f = rgb_np.astype(np.float32) / 255.0
+            rgb_f = (rgb_f - mean) / std
+            imgs.append(torch.from_numpy(rgb_f.transpose(2, 0, 1)).float())
     else:
-        os.environ.pop("HF_DATASETS_OFFLINE", None)
-
-    ds = load_dataset("sayakpaul/nyu_depth_v2", split="validation",
-                      streaming=True, trust_remote_code=True, token=HF_TOKEN)
-
-    imgs = []
-    rgb_display = []
-    for i, row in enumerate(ds):
-        if i >= n_images:
-            break
-        img = row["image"].convert("RGB")
-        imgs.append(transform(img))
-        rgb_display.append(
-            np.array(img.resize((W, H))) / 255.0
-        )
+        # Fallback: HuggingFace streaming
+        if HF_OFFLINE:
+            os.environ["HF_DATASETS_OFFLINE"] = "1"
+        else:
+            os.environ.pop("HF_DATASETS_OFFLINE", None)
+        ds = load_dataset("sayakpaul/nyu_depth_v2", split="validation",
+                          streaming=True, trust_remote_code=True, token=HF_TOKEN)
+        imgs = []
+        rgb_display = []
+        for i, row in enumerate(ds):
+            if i >= n_images:
+                break
+            img = row["image"].convert("RGB")
+            imgs.append(transform(img))
+            rgb_display.append(
+                np.array(img.resize((W, H))) / 255.0
+            )
     batch = torch.stack(imgs).to(device)
 
     feat, skips = backbone(batch)
