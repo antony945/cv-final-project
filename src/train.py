@@ -103,6 +103,10 @@ def _init_wandb(cfg: DictConfig):
                 "compile": cfg.get("compile", False),
             },
         )
+        # Define custom x-axis: epoch/* metrics use "epoch" as x-axis
+        wandb.define_metric("epoch")
+        wandb.define_metric("epoch/*", step_metric="epoch")
+        wandb.define_metric("pca/*", step_metric="epoch")
         return True
     except Exception as e:
         print(f"wandb init failed ({e}), falling back to console logging.")
@@ -256,7 +260,6 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                     epoch_metrics["epoch/gpu_mem_gb"] = (
                         torch.cuda.max_memory_allocated() / 1e9)
                     torch.cuda.reset_peak_memory_stats()
-                wandb.log(epoch_metrics)
 
             # ── Live loss curves (overwritten each epoch) ─────────────
             # TODO: Disable wandb for live loss curves
@@ -277,11 +280,13 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                         out_dir="plots", device=device)
                     log.info(f"PCA visualization saved: {pca_path}")
                     if wandb_active:
-                        import wandb
-                        wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
-                                   "epoch": epoch})
+                        epoch_metrics["pca/visualization"] = wandb.Image(str(pca_path))
                 except Exception as e:
                     log.warning(f"PCA visualization failed at epoch {epoch}: {e}")
+
+            # ── Single epoch-level wandb.log (metrics + optional PCA) ─
+            if wandb_active:
+                wandb.log(epoch_metrics)
 
             # ── Check graceful stop ───────────────────────────────────
             if _stop_requested:
@@ -322,7 +327,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             if wandb_active:
                 import wandb
                 wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
-                           "epoch": epochs})
+                           "epoch": epochs}, commit=False)
         except Exception as e:
             log.warning(f"Final PCA visualization failed: {e}")
 

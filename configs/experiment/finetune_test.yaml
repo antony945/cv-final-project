@@ -14,7 +14,7 @@ data:
 
 finetune:
   resolution: [192, 256]
-  epochs: 2
+  epochs: 100
   bs: 16
   lr: 0.001
   weight_decay: 0.01
@@ -25,7 +25,7 @@ finetune:
   lamb3: 1.0
   freeze_encoder_epochs: 0
   pretrained_encoder: null
-  val_every: 2
+  val_every: 5
 
-ckpt_every: 2
+ckpt_every: 5
 use_wandb: false
