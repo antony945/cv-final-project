@@ -214,6 +214,11 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
 
             # ── Epoch summary ─────────────────────────────────────────
             n = len(loader)
+            if n == 0:
+                raise RuntimeError(
+                    f"DataLoader produced 0 batches (n_samples={cfg.data.n_samples}, "
+                    f"bs={cfg.bs}, drop_last=True). Increase n_samples or decrease bs."
+                )
             ep_lejepa /= n
             ep_sig /= n
             ep_inv /= n
