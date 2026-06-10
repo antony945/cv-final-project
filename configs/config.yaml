@@ -46,6 +46,7 @@ finetune:
   lamb1: 0.5 # gradient loss weight
   lamb2: 1.0 # normal loss weight
   lamb3: 1.0 # SSIM loss weight
+  depth_bias: 3.0 # decoder output bias init (mean depth: 3.0 for NYU, 15.0 for KITTI)
   freeze_encoder_epochs: 0 # 0 = train end-to-end from start
   pretrained_encoder: null # path to LeJEPA checkpoint (optional)
   resume: null # path to full checkpoint for resume training

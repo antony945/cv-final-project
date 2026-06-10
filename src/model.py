@@ -295,7 +295,7 @@ class METERDecoder(nn.Module):
     Takes encoder output + 4 skip connections, produces dense depth map.
     """
 
-    def __init__(self, variant: str = "xxs"):
+    def __init__(self, variant: str = "xxs", depth_bias: float = 3.0):
         super().__init__()
         cfg = _DECODER_CFG[variant]
 
@@ -309,9 +309,9 @@ class METERDecoder(nn.Module):
 
         self.conv_out = nn.Conv2d(cfg["out_ch"], 1, kernel_size=3, padding=1,
                                   bias=True)
-        # TODO: To check if is it necessary to initialize the bias of the last conv layer to 3.0 (mean NYU depth) or if it can be left as default (0.0), added this as we noticed that model outputs were stuck predicting near constant depth values
-        # Initialize bias to mean NYU depth (~3m) so output starts positive
-        nn.init.constant_(self.conv_out.bias, 3.0)
+        # Initialize bias to dataset mean depth so output starts positive
+        # (prevents stuck-at-zero predictions due to ReLU at output)
+        nn.init.constant_(self.conv_out.bias, depth_bias)
 
     def forward(self, x: torch.Tensor, skips: list[torch.Tensor],
                 target_size: tuple[int, int] | None = None) -> torch.Tensor:
@@ -349,11 +349,12 @@ class METERModel(nn.Module):
     """
 
     def __init__(self, variant: str = "xxs",
-                 resolution: tuple[int, int] = (256, 192)):
+                 resolution: tuple[int, int] = (256, 192),
+                 depth_bias: float = 3.0):
         super().__init__()
         self.resolution = resolution  # (H, W) target output
         self.encoder = _BACKBONE_FN[variant](resolution)
-        self.decoder = METERDecoder(variant)
+        self.decoder = METERDecoder(variant, depth_bias=depth_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat, skips = self.encoder(x)

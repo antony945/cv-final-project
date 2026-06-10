@@ -467,7 +467,9 @@ def finetune_depth(cfg: DictConfig) -> dict:
     amp_dtype = _get_amp_dtype(device)
 
     # ── Model ─────────────────────────────────────────────────────────
-    model = METERModel(variant=variant, resolution=resolution).to(device)
+    depth_bias = ft_cfg.get("depth_bias", 3.0)
+    model = METERModel(variant=variant, resolution=resolution,
+                       depth_bias=depth_bias).to(device)
 
     # Load pretrained encoder if specified
     pretrained = ft_cfg.get("pretrained_encoder")
