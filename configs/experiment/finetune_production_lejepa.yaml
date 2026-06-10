@@ -24,7 +24,7 @@ finetune:
   lamb2: 1.0
   lamb3: 1.0
   freeze_encoder_epochs: 0
-  pretrained_encoder: models/lejepa_nyu.pth # path to LeJEPA pretrained encoder checkpoint
+  pretrained_encoder: models/lejepa_xxs_800_10k_128.pth # path to LeJEPA pretrained encoder checkpoint
 
 ckpt_every: 5
 use_wandb: true

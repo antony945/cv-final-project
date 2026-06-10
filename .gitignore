@@ -20,5 +20,3 @@ outputs/**
 *.gslides
 *.gdoc
 *.gsheet
-
-models/
