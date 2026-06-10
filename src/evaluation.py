@@ -122,6 +122,8 @@ def visualize_depth_standalone(checkpoint: str | Path, variant: str | None = Non
     resolution = DEFAULT_VIS_RES  # (192, 256)
     model = METERModel(variant=variant, resolution=resolution).to(DEVICE)
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
+    if "model_state_dict" in state:
+        state = state["model_state_dict"]
     model.load_state_dict(state)
     model.eval()
     print(f"Loaded METER model: {ckpt_path.name} ({variant})")
@@ -208,12 +210,14 @@ def evaluate_full(checkpoint: str | Path, variant: str | None = None,
     resolution = DEFAULT_VIS_RES  # (192, 256)
     model = METERModel(variant=variant, resolution=resolution).to(device)
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
+    if "model_state_dict" in state:
+        state = state["model_state_dict"]
     model.load_state_dict(state)
     model.eval()
 
     # Build a minimal config for get_depth_loader
     cfg = OmegaConf.create({
-        "data": {"dataset": "nyu", "n_samples": 654},  # NYU val has 654 images
+        "data": {"dataset": "nyu", "n_samples": 654, "use_mmap": True},
         "finetune": {"resolution": list(resolution), "bs": 8},
     })
     val_loader = get_depth_loader(cfg, device=device, split="val")
