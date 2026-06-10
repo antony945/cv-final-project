@@ -136,13 +136,110 @@ E.g., if you go from BS=64 to BS=16: `LR = 2e-3 × (16/64) = 5e-4`
 
 The default `2e-3` is from the official LeJEPA example, calibrated for BS=256. Scale linearly with batch size as above.
 
-The scheduler warms up from `0.01 × LR` over 1 epoch, then cosine-decays to `1e-3`. No tuning needed unless you change BS significantly.
+### `WEIGHT_DECAY` — AdamW weight decay (default: `0.01`)
+
+**What it does**: L2 regularization applied to all parameters by AdamW. It shrinks weights toward zero each step, preventing overfitting and improving generalization.
+
+The LeJEPA paper recommends searching over `{1e-1, 1e-2, 1e-5}`:
+- `1e-1`: aggressive regularization — use when overfitting (low N_SAMPLES, many epochs)
+- `1e-2`: balanced (our default) — works well in most cases
+- `1e-5`: near-zero regularization — use for very short runs where overfitting isn't a risk
+
+**Important**: there is **no scheduler on weight decay** — it stays constant throughout training. Only the learning rate is annealed.
+
+### `LR_MIN` — Cosine annealing floor (default: `0.001`)
+
+**What it does**: the minimum learning rate that the cosine scheduler decays *to*. After warmup, LR follows a cosine curve from `lr` down to `lr_min`.
+
+- `lr_min=1e-3` with `lr=2e-3`: mild decay (lr only halves). Keeps the model learning throughout. This is what the LeJEPA minimal example uses.
+- `lr_min=1e-5` with `lr=2e-3`: aggressive full annealing (lr drops to ~0). More standard in the SSL literature (DINO, MAE, etc).
+
+**Recommendation**: keep `1e-3` for our use case. LeJEPA is provably stable and benefits from continued learning at moderate LR. Only lower it for very long runs (400+ epochs) where you want fine-grained convergence at the end.
+
+---
+
+## Learning Rate Schedule — How it works
+
+Our pre-training uses a **2-phase learning rate schedule** via PyTorch's `SequentialLR`:
+
+```
+Phase 1: Linear Warmup (1 epoch)
+   lr goes from 0.01 × lr  →  lr
+
+Phase 2: Cosine Annealing (remaining epochs)
+   lr goes from lr  →  lr_min, following a cosine curve
+```
+
+### The code
+
+```python
+warmup_steps = len(loader)                           # = batches_per_epoch
+total_steps = len(loader) * epochs                   # = total batches
+s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
+s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=cfg.lr_min)
+scheduler = SequentialLR(opt, schedulers=[s1, s2], milestones=[warmup_steps])
+```
+
+The scheduler is **stepped every batch** (not every epoch). This gives smooth transitions.
+
+### Concrete example
+
+With our default config: `lr=2e-3`, `lr_min=1e-3`, `epochs=100`, `BS=128`, `N_SAMPLES=12881`:
+
+```
+batches_per_epoch = 12881 / 128 = ~101
+warmup_steps = 101 (= 1 epoch)
+cosine_steps = 101 × 100 - 101 = 9999
+
+Step 0:     lr = 0.01 × 2e-3 = 2e-5      (cold start)
+Step 50:    lr = 1.0e-3                    (mid-warmup)
+Step 101:   lr = 2e-3                      (warmup complete, peak)
+Step 5000:  lr ≈ 1.5e-3                    (mid-cosine)
+Step 10100: lr = 1e-3                      (final, = lr_min)
+```
+
+### Visual shape
+
+```
+lr
+2e-3 ┤          ╭─────╮
+     │         ╱       ╲
+     │        ╱         ╲
+1.5e-3 ┤      ╱           ╲
+     │     ╱             ╲
+     │    ╱               ╲─────────
+1e-3 ┤   ╱                         ← lr_min (floor)
+     │  ╱
+     │ ╱ ← warmup
+2e-5 ┤╱
+     └──────────────────────────────── steps
+      0   101        5000       10100
+      │←1 ep→│←── cosine decay ──→│
+```
+
+### Why warmup?
+
+Without warmup, the optimizer starts with full LR on randomly initialized weights. This causes:
+- Large, unstable gradient updates in the first few hundred steps
+- Risk of divergence (NaN loss), especially with mixed precision
+- SIGReg can spike because the embedding space starts degenerate
+
+Linear warmup gives the model time to "find its footing" — gradients stabilize, batch normalization layers accumulate useful statistics, and the embedding space spreads out gently.
+
+**1 epoch is enough** because LeJEPA is provably stable (no momentum teacher, no stop-gradient), so it doesn't need the 5-10 epoch warmups common in DINO/BYOL.
+
+### Why cosine (not step/constant)?
+
+Cosine annealing provides a smooth, continuous decay without the sudden "cliff" of StepLR. Benefits:
+- No hyperparameter for step timing (just total steps + floor)
+- Gradual decrease matches the diminishing-returns nature of training
+- The paper's minimal example uses exactly this schedule
 
 ---
 
 ## Model parameters
 
-### `VARIANT` — MobileViT size (default: `xxs`)
+### `VARIANT` — METER encoder size (default: `xxs`)
 
 | Variant | Params | emb_dim | VRAM (+projector) | Notes |
 |---------|--------|---------|-------------------|-------|
@@ -182,10 +279,39 @@ The official LeJEPA example uses `V=4`. More views = stronger invariance signal 
 `128×128` is the official LeJEPA recommendation (same as their ViT example). The METER encoder is fully convolutional, so the backbone is resolution-agnostic — this doesn't affect downstream fine-tuning quality.
 
 - `128`: fast, standard SSL practice ✓
-- `192` or `256`: higher-res crops, slightly richer features, ~2.25× more VRAM
+- `192` or `256`: higher-res crops, slightly richer features, ~2.25–4× more VRAM
 - `64`: very fast, but crops may be too small to contain useful structure
 
-**Keep at 128** unless you have abundant VRAM.
+#### Should I match the fine-tuning resolution (192×256)?
+
+This is a natural question since our fine-tuning uses `192×256`. Here's the tradeoff:
+
+**Pros of higher pretrain resolution (192×192 or 256×256)**:
+- Closer distribution match between pretrain and finetune — the encoder sees similar spatial scales during both phases, reducing the "resolution gap" at transfer
+- More spatial tokens per image → richer PCA maps, more fine-grained features
+- The encoder learns to represent small objects that are invisible at 128×128
+- Better feature maps at the H/16 and H/32 levels (12×12 vs 8×8 at 192, or 16×16 vs 8×8 at 256)
+
+**Cons of higher pretrain resolution**:
+- **VRAM scales quadratically**: 192×192 is 2.25× more pixels → ~2× more VRAM per image. 256×256 is 4× more pixels → ~3.5× more VRAM. With BS=128 and 4 views, you may need to halve BS (fewer steps/epoch)
+- **Slower training**: each forward/backward pass takes proportionally longer. A 200-epoch run at 256×256 takes ~3-4× longer than at 128×128
+- **The paper uses 128**: the LeJEPA minimal example trains at 128×128 on ImageNette and achieves SOTA. Higher resolution was not shown to help significantly for self-supervised learning
+- **Diminishing returns for SSL**: the invariance objective doesn't inherently benefit from seeing more pixels — it learns crop-invariant features regardless. The additional pixels mostly add computation cost
+- **Resolution mismatch is normal in SSL**: DINO pretrains at 224 but finetunes at 518. MAE pretrains at 224, finetunes at 448. The community consensus is that SSL benefits more from data diversity than pixel count
+
+**Recommendation**:
+- **Default**: keep `128×128` for pretraining. It's fast, proven, and the encoder adapts to higher resolution at fine-tuning time (fully convolutional)
+- **If you have spare VRAM** (Colab A100): try `192×192` as an ablation — compare PCA maps and downstream depth metrics vs. 128×128 baseline
+- **Don't go to 256×256** unless you halve batch size — the VRAM cost is prohibitive and benefits are marginal for SSL
+
+| Resolution | Tokens (H/16 × H/32) | VRAM (BS=128, 4 views, xxs) | Training speed | Notes |
+|------------|----------------------|----------------------------|----------------|-------|
+| 64×64 | 4×4 + 2×2 | ~1.5 GB | very fast | Too small, poor features |
+| 128×128 | 8×8 + 4×4 | ~4.5 GB | baseline | **Recommended** |
+| 192×192 | 12×12 + 6×6 | ~9 GB | ~2.2× slower | Ablation on A100 |
+| 256×256 | 16×16 + 8×8 | ~16 GB | ~4× slower | Requires halved BS |
+
+**Keep at 128** unless you have abundant VRAM and want to ablate.
 
 ---
 
@@ -206,19 +332,18 @@ Set `false` for quick tests. When `true`, logs per-batch losses to your wandb da
 PCA probing is run **automatically at every checkpoint** during training. Results are saved inside the hydra run folder:
 
 ```
-outputs/xxs_2026-06-05_17-41-30/
+outputs/pretrain/xxs_2026-06-05_17-41-30/
 ├── checkpoints/
 │   ├── lejepa_xxs_epoch10.pth
 │   └── lejepa_xxs_final.pth
-├── pca/
+├── plots/
+│   ├── loss_curves_xxs.png
 │   ├── pca_xxs_epoch10.png      ← auto-generated
 │   └── pca_xxs_epoch50.png      ← auto-generated (final)
-├── plots/
-│   └── loss_curves_xxs.png
 └── main.log
 ```
 
-This lets you visually track how features evolve during training without manually running `visualize.py`. The auto-PCA uses 4 validation images (fewer than the standalone 6) for speed.
+This lets you visually track how features evolve during training without manually running `pca_visualization.py`. The auto-PCA uses 4 validation images (fewer than the standalone 6) for speed.
 
 If PCA fails for any reason (e.g., dataset not cached), training continues normally — it's wrapped in a try/except and logs a warning.
 
@@ -233,6 +358,8 @@ N_SAMPLES=100
 PRETRAIN_EPOCHS=5
 PRETRAIN_BS=4
 PRETRAIN_LR=2e-3
+WEIGHT_DECAY=0.01
+LR_MIN=0.001
 USE_WANDB=false
 ```
 ~2 min. Just check the pipeline works.
@@ -244,6 +371,8 @@ N_SAMPLES=5000
 PRETRAIN_EPOCHS=50
 PRETRAIN_BS=16
 PRETRAIN_LR=5e-4
+WEIGHT_DECAY=0.01
+LR_MIN=5e-4
 CKPT_EVERY=10
 USE_WANDB=true
 ```
@@ -256,6 +385,8 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=64
 PRETRAIN_LR=2e-3
+WEIGHT_DECAY=0.01
+LR_MIN=0.001
 CKPT_EVERY=25
 USE_WANDB=true
 ```
@@ -268,6 +399,8 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=256
 PRETRAIN_LR=2e-3
+WEIGHT_DECAY=0.01
+LR_MIN=0.001
 CKPT_EVERY=25
 USE_WANDB=true
 ```
@@ -311,6 +444,8 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=256
 PRETRAIN_LR=2e-3
+WEIGHT_DECAY=0.01
+LR_MIN=0.001
 N_VIEWS=4
 PROJ_DIM=16
 PRETRAIN_RES=128
@@ -327,6 +462,8 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=64
 PRETRAIN_LR=5e-4
+WEIGHT_DECAY=0.01
+LR_MIN=0.001
 N_VIEWS=4
 PROJ_DIM=16
 PRETRAIN_RES=128

@@ -1,4 +1,4 @@
-"""LeJEPA pre-training loop for MobileViT encoder.
+"""LeJEPA pre-training loop for METER encoder.
 
 Follows the official LeJEPA minimal example structure:
 - AdamW optimizer, weight_decay=5e-2
@@ -12,10 +12,12 @@ Follows the official LeJEPA minimal example structure:
 import logging
 import signal
 import sys
+import time
 import torch
 import warnings
 from pathlib import Path
 from torch.amp import autocast
+from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm.auto import tqdm
 from omegaconf import DictConfig
@@ -23,10 +25,10 @@ from omegaconf import DictConfig
 log = logging.getLogger(__name__)
 
 from src.config import DEVICE as _AUTO_DEVICE, EMB_DIM
-from src.model import MobileViTLeJEPA
-from src.loss import SIGReg, compute_lejepa_loss
+from src.model import METERLeJEPA
+from src.utils import SIGReg, compute_lejepa_loss
 from src.data import get_pretrain_loader
-from src.visualize import visualize_pca_inline
+from src.pca_visualization import visualize_pca_inline
 
 
 def _setup_torch_performance(device: str):
@@ -79,19 +81,26 @@ def _init_wandb(cfg: DictConfig):
         return False
     try:
         import wandb
+        run_name = (f"lejepa_{cfg.variant}_lr{cfg.lr}_bs{cfg.bs}"
+                    f"_lam{cfg.lamb}")
         wandb.init(
             project=cfg.wandb_project,
-            name=f"lejepa_{cfg.variant}",
+            name=run_name,
             config={
                 "variant": cfg.variant,
                 "emb_dim": EMB_DIM[cfg.variant],
                 "epochs": cfg.epochs,
                 "batch_size": cfg.bs,
                 "lr": cfg.lr,
+                "lr_min": cfg.lr_min,
+                "weight_decay": cfg.weight_decay,
                 "lambda": cfg.lamb,
                 "proj_dim": cfg.proj_dim,
+                "n_views": cfg.n_views,
+                "n_samples": cfg.data.n_samples,
                 "resolution": cfg.resolution,
                 "device": cfg.device,
+                "compile": cfg.get("compile", False),
             },
         )
         return True
@@ -112,7 +121,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     epochs = cfg.epochs
     device = _resolve_device(cfg)
 
-    log.info(f"LeJEPA Pre-training: MobileViT-{variant.upper()}")
+    log.info(f"LeJEPA Pre-training: METER-{variant.upper()}")
     log.info(f"Epochs: {epochs} | BS: {cfg.bs} | lambda: {cfg.lamb} | Device: {device}")
 
     _setup_torch_performance(device)
@@ -120,7 +129,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     wandb_active = _init_wandb(cfg)
 
     # ── Model, loss, optimizer ────────────────────────────────────────
-    net = MobileViTLeJEPA(variant=variant, proj_dim=cfg.proj_dim,
+    net = METERLeJEPA(variant=variant, proj_dim=cfg.proj_dim,
                           resolution=cfg.resolution).to(device)
     if cfg.get("compile", False) and device == "cuda" and sys.platform != "win32":
         net = torch.compile(net, mode="reduce-overhead")
@@ -128,7 +137,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     sigreg = SIGReg().to(device)
 
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr,
-                            weight_decay=5e-2)
+                            weight_decay=cfg.weight_decay)
 
     loader = get_pretrain_loader(cfg, device=device)
 
@@ -136,7 +145,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     warmup_steps = len(loader)
     total_steps = len(loader) * epochs
     s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=1e-3)
+    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=cfg.lr_min)
     scheduler = SequentialLR(opt, schedulers=[s1, s2], milestones=[warmup_steps])
 
     history = {"lejepa": [], "sigreg": [], "inv": []}
@@ -160,11 +169,17 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     signal.signal(signal.SIGINT, _graceful_handler)
     last_completed_epoch = 0
 
+    train_start_time = time.time()
+    embed_std = 0.0
+
     # ── Training loop ─────────────────────────────────────────────────
     try:
         for epoch in range(1, epochs + 1):
             net.train()
             ep_lejepa = ep_sig = ep_inv = 0.0
+            ep_grad_norm = 0.0
+            last_proj = None
+            epoch_start = time.time()
 
             pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
             for views, _ in pbar:
@@ -176,12 +191,15 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
 
                 opt.zero_grad()
                 loss.backward()
+                grad_norm = clip_grad_norm_(net.parameters(), max_norm=float('inf'))
                 opt.step()
                 scheduler.step()
 
                 ep_lejepa += components["lejepa"]
                 ep_sig += components["sigreg"]
                 ep_inv += components["inv"]
+                ep_grad_norm += grad_norm.item()
+                last_proj = proj.detach()
 
                 pbar.set_postfix(loss=f"{components['lejepa']:.4f}")
 
@@ -191,6 +209,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                         "train/lejepa": components["lejepa"],
                         "train/sigreg": components["sigreg"],
                         "train/inv": components["inv"],
+                        "train/grad_norm": grad_norm.item(),
                     })
 
             # ── Epoch summary ─────────────────────────────────────────
@@ -198,16 +217,45 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             ep_lejepa /= n
             ep_sig /= n
             ep_inv /= n
+            ep_grad_norm /= n
+            epoch_time = time.time() - epoch_start
+            samples_per_sec = len(loader.dataset) / epoch_time
+
+            # Embedding std (collapse indicator)
+            embed_std = last_proj.std(dim=1).mean().item() if last_proj is not None else 0.0
+
             history["lejepa"].append(ep_lejepa)
             history["sigreg"].append(ep_sig)
             history["inv"].append(ep_inv)
             last_completed_epoch = epoch
 
             log.info(f"Epoch {epoch:>3} | lejepa={ep_lejepa:.4f} "
-                     f"sigreg={ep_sig:.4f} inv={ep_inv:.4f}")
+                     f"sigreg={ep_sig:.4f} inv={ep_inv:.4f} "
+                     f"grad_norm={ep_grad_norm:.4f} embed_std={embed_std:.4f}")
+
+            # ── Epoch-level wandb logging ──────────────────────────────
+            if wandb_active:
+                import wandb
+                epoch_metrics = {
+                    "epoch/lejepa": ep_lejepa,
+                    "epoch/sigreg": ep_sig,
+                    "epoch/inv": ep_inv,
+                    "epoch/grad_norm": ep_grad_norm,
+                    "epoch/embed_std": embed_std,
+                    "epoch/lr": scheduler.get_last_lr()[0],
+                    "epoch/time_sec": epoch_time,
+                    "epoch/samples_per_sec": samples_per_sec,
+                    "epoch": epoch,
+                }
+                if device == "cuda":
+                    epoch_metrics["epoch/gpu_mem_gb"] = (
+                        torch.cuda.max_memory_allocated() / 1e9)
+                    torch.cuda.reset_peak_memory_stats()
+                wandb.log(epoch_metrics)
 
             # ── Live loss curves (overwritten each epoch) ─────────────
-            _plot_loss_curves(history, variant)
+            # TODO: Disable wandb for live loss curves
+            _plot_loss_curves(history, variant, False)
 
             # ── Checkpoint ────────────────────────────────────────────
             if epoch % cfg.ckpt_every == 0:
@@ -221,8 +269,12 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                 try:
                     pca_path = visualize_pca_inline(
                         net.backbone.state_dict(), variant, epoch,
-                        out_dir="pca", device=device)
+                        out_dir="plots", device=device)
                     log.info(f"PCA visualization saved: {pca_path}")
+                    if wandb_active:
+                        import wandb
+                        wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
+                                   "epoch": epoch})
                 except Exception as e:
                     log.warning(f"PCA visualization failed at epoch {epoch}: {e}")
 
@@ -260,19 +312,31 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
         try:
             pca_path = visualize_pca_inline(
                 net.backbone.state_dict(), variant, epochs,
-                out_dir="pca", device=device)
+                out_dir="plots", device=device)
             log.info(f"Final PCA visualization saved: {pca_path}")
+            if wandb_active:
+                import wandb
+                wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
+                           "epoch": epochs})
         except Exception as e:
             log.warning(f"Final PCA visualization failed: {e}")
 
+    # ── wandb run summary ─────────────────────────────────────────────
     if wandb_active:
         import wandb
+        total_time_min = (time.time() - train_start_time) / 60.0
+        wandb.run.summary["final_lejepa_loss"] = history["lejepa"][-1] if history["lejepa"] else None
+        wandb.run.summary["final_sigreg"] = history["sigreg"][-1] if history["sigreg"] else None
+        wandb.run.summary["final_inv"] = history["inv"][-1] if history["inv"] else None
+        wandb.run.summary["final_embed_std"] = embed_std
+        wandb.run.summary["total_epochs"] = last_completed_epoch
+        wandb.run.summary["total_time_min"] = total_time_min
         wandb.finish()
 
     return history
 
 
-def _plot_loss_curves(history: dict, variant: str):
+def _plot_loss_curves(history: dict, variant: str, wandb_active: bool = False):
     """Save a loss curve plot to current working directory (hydra output dir)."""
     import matplotlib.pyplot as plt
 
@@ -297,12 +361,16 @@ def _plot_loss_curves(history: dict, variant: str):
     axes[2].set_xlabel("Epoch")
     axes[2].grid(True, alpha=0.3)
 
-    plt.suptitle(f"LeJEPA Training — MobileViT-{variant.upper()}", fontsize=13)
+    plt.suptitle(f"LeJEPA Training — METER-{variant.upper()}", fontsize=13)
     plt.tight_layout()
     out_path = plots_dir / f"loss_curves_{variant}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     log.info(f"Loss curves saved: {out_path}")
     plt.close(fig)
+
+    if wandb_active:
+        import wandb
+        wandb.log({"plots/loss_curves": wandb.Image(str(out_path))})
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -322,7 +390,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
         dict with training history and best metrics.
     """
     from src.model import METERModel
-    from src.loss import BalancedDepthLoss, compute_depth_metrics
+    from src.utils import BalancedDepthLoss, compute_depth_metrics
     from src.data import get_depth_loader
 
     variant = cfg.variant
@@ -332,7 +400,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
     epochs = ft_cfg.epochs
     bs = ft_cfg.get("bs", cfg.get("bs", 8))
 
-    log.info(f"METER Fine-tuning: MobileViT-{variant.upper()}")
+    log.info(f"METER Fine-tuning: METER-{variant.upper()}")
     log.info(f"Resolution: {resolution} | Epochs: {epochs} | BS: {bs} | Device: {device}")
 
     _setup_torch_performance(device)
@@ -495,7 +563,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 log.info(f"Checkpoint saved: {ckpt_path}")
 
                 # Depth prediction visualization
-                from src.visualize import visualize_depth_inline
+                from src.evaluation import visualize_depth_inline
                 vis_path = visualize_depth_inline(
                     model, variant, epoch, out_dir="plots", device=device)
                 log.info(f"Depth visualization saved: {vis_path}")
@@ -547,7 +615,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
         log.info(f"Final model saved: {final_path}")
 
         # Final depth visualization
-        from src.visualize import visualize_depth_inline
+        from src.evaluation import visualize_depth_inline
         vis_path = visualize_depth_inline(
             model, variant, epochs, out_dir="plots", device=device)
         log.info(f"Final depth visualization: {vis_path}")
@@ -564,7 +632,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
 def _validate_depth(model, cfg, device) -> dict:
     """Run validation and compute depth metrics."""
     from src.data import get_depth_loader
-    from src.loss import compute_depth_metrics
+    from src.utils import compute_depth_metrics
 
     model.eval()
     val_loader = get_depth_loader(cfg, device=device, split="val")
@@ -614,7 +682,7 @@ def _plot_depth_loss_curves(history: dict, variant: str):
     axes[3].set_xlabel("Epoch")
     axes[3].grid(True, alpha=0.3)
 
-    plt.suptitle(f"METER Depth Fine-tuning — MobileViT-{variant.upper()}", fontsize=13)
+    plt.suptitle(f"METER Depth Fine-tuning — METER-{variant.upper()}", fontsize=13)
     plt.tight_layout()
     out_path = plots_dir / f"depth_loss_curves_{variant}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight")

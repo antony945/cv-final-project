@@ -1,4 +1,4 @@
-"""METER encoder (MobileViT) + LeJEPA projector wrapper.
+"""METER encoder + decoder + LeJEPA projector wrapper.
 
 Architecture ported from Papa et al. (2024) METER paper.
 See docs/architecture.md for detailed explanation.
@@ -167,11 +167,11 @@ class MobileViTBlock(nn.Module):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MobileViT Encoder (METER)
+#  METER Encoder
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-class MobileViT(nn.Module):
+class METEREncoder(nn.Module):
     """METER encoder backbone — all three variants (xxs / xs / s).
 
     Returns:
@@ -230,25 +230,25 @@ class MobileViT(nn.Module):
 # ── Variant factory functions ─────────────────────────────────────────
 
 
-def mobilevit_xxs(image_size):
+def meter_xxs(image_size):
     dims = [64, 80, 96]
     channels = [16, 16, 24, 24, 48, 48, 64, 64, 80, 80, 160]
-    return MobileViT(image_size, dims, channels, expansion=2)
+    return METEREncoder(image_size, dims, channels, expansion=2)
 
 
-def mobilevit_xs(image_size):
+def meter_xs(image_size):
     dims = [96, 120, 144]
     channels = [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 192]
-    return MobileViT(image_size, dims, channels)
+    return METEREncoder(image_size, dims, channels)
 
 
-def mobilevit_s(image_size):
+def meter_s(image_size):
     dims = [144, 192, 240]
     channels = [16, 32, 64, 64, 96, 96, 128, 128, 160, 160, 320]
-    return MobileViT(image_size, dims, channels)
+    return METEREncoder(image_size, dims, channels)
 
 
-_BACKBONE_FN = {"xxs": mobilevit_xxs, "xs": mobilevit_xs, "s": mobilevit_s}
+_BACKBONE_FN = {"xxs": meter_xxs, "xs": meter_xs, "s": meter_s}
 
 # Channel configs for decoder (derived from official METER source)
 _DECODER_CFG = {
@@ -342,7 +342,7 @@ class METERDecoder(nn.Module):
 
 
 class METERModel(nn.Module):
-    """Full METER model: MobileViT encoder + convolutional decoder.
+    """Full METER model: encoder + convolutional decoder.
 
     Input:  (B, 3, H, W) — single RGB image
     Output: (B, 1, H, W) — dense depth map
@@ -371,8 +371,8 @@ class METERModel(nn.Module):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-class MobileViTLeJEPA(nn.Module):
-    """MobileViT backbone + projector for LeJEPA self-supervised pre-training.
+class METERLeJEPA(nn.Module):
+    """METER encoder + projector for LeJEPA self-supervised pre-training.
 
     Input:  (B, V, 3, H, W) — V augmented views per image
     Output:

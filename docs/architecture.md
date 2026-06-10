@@ -133,12 +133,12 @@ Encoder output (C_final, H/32, W/32)
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  MobileViTLeJEPA Wrapper                             │
+│  METERLeJEPA Wrapper                                 │
 │                                                      │
 │  Input: (B, V, 3, 128, 128) — V augmented views     │
 │                                                      │
 │  ┌────────────────────┐                              │
-│  │ MobileViT Encoder  │  ← exact METER encoder      │
+│  │ METER Encoder      │  ← exact METER encoder      │
 │  │ (any resolution)   │                              │
 │  └────────┬───────────┘                              │
 │           │ feat: (B*V, C_final, 4, 4)               │

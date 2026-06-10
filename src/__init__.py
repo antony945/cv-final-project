@@ -1,1 +1,1 @@
-# LeJEPA pre-training for METER (MobileViT) monocular depth estimation
+# LeJEPA pre-training for METER monocular depth estimation

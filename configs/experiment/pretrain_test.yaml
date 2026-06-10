@@ -12,9 +12,16 @@ data:
   use_cache: false
   use_mmap: true
 
-epochs: 40
-bs: 4
-lr: 2e-3
+epochs: 100 # paper uses 100 epochs on 1000 samples
+bs: 128 # suggested by original paper, can go also to 256
+lr: 2e-3 # learning rate (scale with BS: lr = 2e-3 × bs/256)
+weight_decay: 0.01 # AdamW weight decay — paper recommends {1e-1, 1e-2, 1e-5}
+lr_min: 0.001 # cosine annealing floor (eta_min)
+
+lamb: 0.02 # sigreg weight, paper suggest 0.05, minimal example in the same report suggests 0.02
+n_views: 4 # augmented views per image, paper divides those into globlal and local, suggesting 2 and 6 respectively = 8, but minimal example suggests 4 mixed views
+proj_dim: 16 # projector output dim (paper recommends that even with just 16 yields good results)
+resolution: 128 # square crop size for SSL pre-training, paper suggest resolution 224x224 for global views and 96x96 for local views, but minimal example suggests 128x128 for all views
 
 ckpt_every: 5
 use_wandb: false
