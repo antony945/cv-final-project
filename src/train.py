@@ -128,7 +128,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     sigreg = SIGReg().to(device)
 
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr,
-                            weight_decay=5e-2)
+                            weight_decay=cfg.weight_decay)
 
     loader = get_pretrain_loader(cfg, device=device)
 
@@ -136,7 +136,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     warmup_steps = len(loader)
     total_steps = len(loader) * epochs
     s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=1e-3)
+    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=cfg.lr_min)
     scheduler = SequentialLR(opt, schedulers=[s1, s2], milestones=[warmup_steps])
 
     history = {"lejepa": [], "sigreg": [], "inv": []}
