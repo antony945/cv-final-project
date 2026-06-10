@@ -12,9 +12,19 @@ data:
   use_cache: false
   use_mmap: true
 
-epochs: 200
-bs: 256
-lr: 2e-3 # full LR at paper-scale batch size
+epochs: 200 # paper uses 100 epochs on 1000 samples
+bs: 128 # suggested by original paper, can go also to 256
+lr: 2e-3 # learning rate (maybe it should scale with BS: lr = 2e-3 × bs/256)
+
+# TODO: To implement this in code
+# AdamW optimizer with lr ∈{5𝑒 −3,5𝑒 −4}and wd ∈
+# {1𝑒 −1,1𝑒 −2,1𝑒 −5}–no scheduler on weight-decay,
+# standard linear warm-up cosine-annealing for lr
+
+lamb: 0.02 # sigreg weight, paper suggest 0.05, minimal example in the same report suggests 0.02
+n_views: 4 # augmented views per image, paper divides those into globlal and local, suggesting 2 and 6 respectively = 8, but minimal example suggests 4 mixed views
+proj_dim: 16 # projector output dim (paper recommends that even with just 16 yields good results)
+resolution: 128 # square crop size for SSL pre-training, paper suggest resolution 224x224 for global views and 96x96 for local views, but minimal example suggests 128x128 for all views
 
 ckpt_every: 25
 use_wandb: true
