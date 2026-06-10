@@ -12,8 +12,7 @@ wheels/
 .env
 
 # Datasets
-datasets/nyu/**.tar
-datasets/**/**.npy
+datasets/**
 
 # Outputs
 outputs/**

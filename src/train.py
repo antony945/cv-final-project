@@ -75,7 +75,7 @@ def _save_full_checkpoint(path: Path, model, optimizer, scheduler,
     torch.save(state, path)
 
 
-def _init_wandb(cfg: DictConfig):
+def _init_wandb_pretrain(cfg: DictConfig):
     """Initialize wandb if enabled. Returns True if active."""
     if not cfg.use_wandb:
         return False
@@ -86,6 +86,7 @@ def _init_wandb(cfg: DictConfig):
         wandb.init(
             project=cfg.wandb_project,
             name=run_name,
+            job_type="pretrain",
             config={
                 "variant": cfg.variant,
                 "emb_dim": EMB_DIM[cfg.variant],
@@ -103,6 +104,10 @@ def _init_wandb(cfg: DictConfig):
                 "compile": cfg.get("compile", False),
             },
         )
+        # Define custom x-axis: epoch/* metrics use "epoch" as x-axis
+        wandb.define_metric("epoch")
+        wandb.define_metric("epoch/*", step_metric="epoch")
+        wandb.define_metric("pca/*", step_metric="epoch")
         return True
     except Exception as e:
         print(f"wandb init failed ({e}), falling back to console logging.")
@@ -126,7 +131,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
 
     _setup_torch_performance(device)
     amp_dtype = _get_amp_dtype(device)
-    wandb_active = _init_wandb(cfg)
+    wandb_active = _init_wandb_pretrain(cfg)
 
     # ── Model, loss, optimizer ────────────────────────────────────────
     net = METERLeJEPA(variant=variant, proj_dim=cfg.proj_dim,
@@ -214,6 +219,11 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
 
             # ── Epoch summary ─────────────────────────────────────────
             n = len(loader)
+            if n == 0:
+                raise RuntimeError(
+                    f"DataLoader produced 0 batches (n_samples={cfg.data.n_samples}, "
+                    f"bs={cfg.bs}, drop_last=True). Increase n_samples or decrease bs."
+                )
             ep_lejepa /= n
             ep_sig /= n
             ep_inv /= n
@@ -251,7 +261,6 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                     epoch_metrics["epoch/gpu_mem_gb"] = (
                         torch.cuda.max_memory_allocated() / 1e9)
                     torch.cuda.reset_peak_memory_stats()
-                wandb.log(epoch_metrics)
 
             # ── Live loss curves (overwritten each epoch) ─────────────
             # TODO: Disable wandb for live loss curves
@@ -272,11 +281,13 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                         out_dir="plots", device=device)
                     log.info(f"PCA visualization saved: {pca_path}")
                     if wandb_active:
-                        import wandb
-                        wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
-                                   "epoch": epoch})
+                        epoch_metrics["pca/visualization"] = wandb.Image(str(pca_path))
                 except Exception as e:
                     log.warning(f"PCA visualization failed at epoch {epoch}: {e}")
+
+            # ── Single epoch-level wandb.log (metrics + optional PCA) ─
+            if wandb_active:
+                wandb.log(epoch_metrics)
 
             # ── Check graceful stop ───────────────────────────────────
             if _stop_requested:
@@ -317,9 +328,13 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             if wandb_active:
                 import wandb
                 wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
-                           "epoch": epochs})
+                           "epoch": epochs}, commit=False)
         except Exception as e:
             log.warning(f"Final PCA visualization failed: {e}")
+
+    # ── Final loss curves (upload to wandb) ───────────────────────────
+    if history["lejepa"]:
+        _plot_loss_curves(history, variant, wandb_active)
 
     # ── wandb run summary ─────────────────────────────────────────────
     if wandb_active:
@@ -352,12 +367,12 @@ def _plot_loss_curves(history: dict, variant: str, wandb_active: bool = False):
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(epochs_range, history["inv"], "r-", linewidth=2)
-    axes[1].set_title("Invariance Loss (should ↓)")
+    axes[1].set_title("Invariance Loss")
     axes[1].set_xlabel("Epoch")
     axes[1].grid(True, alpha=0.3)
 
     axes[2].plot(epochs_range, history["sigreg"], "g-", linewidth=2)
-    axes[2].set_title("SIGReg Loss (should stay bounded)")
+    axes[2].set_title("SIGReg Loss")
     axes[2].set_xlabel("Epoch")
     axes[2].grid(True, alpha=0.3)
 
@@ -376,6 +391,51 @@ def _plot_loss_curves(history: dict, variant: str, wandb_active: bool = False):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  METER Fine-tuning (Depth Estimation)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _init_wandb_finetune(cfg: DictConfig):
+    """Initialize wandb for finetune runs. Returns True if active."""
+    if not cfg.get("use_wandb", False):
+        return False
+    try:
+        import wandb
+        ft_cfg = cfg.finetune
+        pretrained = ft_cfg.get("pretrained_encoder")
+        freeze_n = ft_cfg.get("freeze_encoder_epochs", 0)
+        run_name = (f"meter_{cfg.variant}_lr{ft_cfg.lr}_bs{ft_cfg.get('bs', cfg.get('bs', 8))}"
+                    f"_freeze{freeze_n}_{'pretrained' if pretrained else 'scratch'}")
+        wandb.init(
+            project=cfg.wandb_project,
+            name=run_name,
+            job_type="finetune",
+            config={
+                "variant": cfg.variant,
+                "emb_dim": EMB_DIM[cfg.variant],
+                "epochs": ft_cfg.epochs,
+                "batch_size": ft_cfg.get("bs", cfg.get("bs", 8)),
+                "lr": ft_cfg.lr,
+                "weight_decay": ft_cfg.weight_decay,
+                "lr_step_size": ft_cfg.lr_step_size,
+                "lr_gamma": ft_cfg.lr_gamma,
+                "lamb1": ft_cfg.get("lamb1", 0.5),
+                "lamb2": ft_cfg.get("lamb2", 1.0),
+                "lamb3": ft_cfg.get("lamb3", 1.0),
+                "freeze_encoder_epochs": freeze_n,
+                "pretrained_encoder": bool(pretrained),
+                "resolution": list(ft_cfg.resolution),
+                "n_samples": cfg.data.n_samples,
+                "device": cfg.device,
+                "compile": cfg.get("compile", False),
+            },
+        )
+        # Define custom x-axes
+        wandb.define_metric("epoch")
+        wandb.define_metric("epoch/*", step_metric="epoch")
+        wandb.define_metric("val/*", step_metric="epoch")
+        wandb.define_metric("depth_vis/*", step_metric="epoch")
+        return True
+    except Exception as e:
+        print(f"wandb init failed ({e}), falling back to console logging.")
+        return False
 
 
 def finetune_depth(cfg: DictConfig) -> dict:
@@ -475,12 +535,13 @@ def finetune_depth(cfg: DictConfig) -> dict:
 
     # ── Data ──────────────────────────────────────────────────────────
     train_loader = get_depth_loader(cfg, device=device, split="train")
-    val_every = ft_cfg.get("val_every", 5)
+    ckpt_every = cfg.get("ckpt_every", 10)
 
     best_metrics = {}
+    best_delta1 = 0.0
 
     # ── WandB ─────────────────────────────────────────────────────────
-    wandb_active = _init_wandb(cfg) if cfg.get("use_wandb", False) else False
+    wandb_active = _init_wandb_finetune(cfg)
 
     # ── Graceful interrupt handling ───────────────────────────────────
     _stop_requested = False
@@ -496,10 +557,13 @@ def finetune_depth(cfg: DictConfig) -> dict:
     signal.signal(signal.SIGINT, _graceful_handler)
     last_completed_epoch = start_epoch - 1
 
+    train_start_time = time.time()
+
     # ── Training loop ─────────────────────────────────────────────────
     try:
         for epoch in range(start_epoch, epochs + 1):
             model.train()
+            epoch_start = time.time()
 
             # Unfreeze encoder after freeze period
             if freeze_epochs > 0 and epoch == freeze_epochs + 1:
@@ -514,6 +578,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 log.info(f"Encoder unfrozen at epoch {epoch}.")
 
             ep_losses = {k: 0.0 for k in history}
+            ep_grad_norm = 0.0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
 
             for rgb, depth_gt in pbar:
@@ -527,34 +592,62 @@ def finetune_depth(cfg: DictConfig) -> dict:
 
                 opt.zero_grad()
                 loss.backward()
+                grad_norm = clip_grad_norm_(model.parameters(), max_norm=float('inf'))
                 opt.step()
 
                 for k in ep_losses:
                     ep_losses[k] += components[k]
+                ep_grad_norm += grad_norm.item()
                 pbar.set_postfix(loss=f"{components['total']:.4f}")
 
                 if wandb_active:
                     import wandb
-                    wandb.log({f"train/{k}": v for k, v in components.items()})
+                    batch_log = {f"train/{k}": v for k, v in components.items()}
+                    batch_log["train/grad_norm"] = grad_norm.item()
+                    wandb.log(batch_log)
 
             # ── Epoch summary ─────────────────────────────────────────────
             scheduler.step()
             n = len(train_loader)
             for k in history:
                 history[k].append(ep_losses[k] / n)
+            ep_grad_norm /= n
+            epoch_time = time.time() - epoch_start
+            samples_per_sec = len(train_loader.dataset) / epoch_time
             last_completed_epoch = epoch
 
             log.info(f"Epoch {epoch:>3} | loss={history['total'][-1]:.4f} "
                      f"depth={history['depth'][-1]:.4f} "
                      f"grad={history['grad'][-1]:.4f} "
+                     f"grad_norm={ep_grad_norm:.4f} "
                      f"lr={scheduler.get_last_lr()[0]:.6f}")
 
-            # ── Live loss curves (overwritten each epoch) ─────────────
-            _plot_depth_loss_curves(history, variant)
+            # ── Epoch-level wandb logging ──────────────────────────────
+            if wandb_active:
+                import wandb
+                epoch_metrics = {
+                    "epoch/total": history["total"][-1],
+                    "epoch/depth": history["depth"][-1],
+                    "epoch/grad": history["grad"][-1],
+                    "epoch/norm": history["norm"][-1],
+                    "epoch/ssim": history["ssim"][-1],
+                    "epoch/grad_norm": ep_grad_norm,
+                    "epoch/lr": scheduler.get_last_lr()[0],
+                    "epoch/time_sec": epoch_time,
+                    "epoch/samples_per_sec": samples_per_sec,
+                    "epoch": epoch,
+                }
+                if device == "cuda":
+                    epoch_metrics["epoch/gpu_mem_gb"] = (
+                        torch.cuda.max_memory_allocated() / 1e9)
+                    torch.cuda.reset_peak_memory_stats()
 
-            # ── Checkpoint ────────────────────────────────────────────────
-            ckpt_every = cfg.get("ckpt_every", 10)
-            if epoch % ckpt_every == 0:
+            # ── Live loss curves (overwritten each epoch) ─────────────
+            _plot_depth_loss_curves(history, variant, False)
+
+            # ── Checkpoint + Validation + Depth Vis (unified) ─────────
+            if epoch % ckpt_every == 0 or epoch == epochs:
+                # Checkpoint
                 ckpt_dir = Path("checkpoints")
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
                 ckpt_path = ckpt_dir / f"meter_{variant}_epoch{epoch}.pth"
@@ -567,19 +660,27 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 vis_path = visualize_depth_inline(
                     model, variant, epoch, out_dir="plots", device=device)
                 log.info(f"Depth visualization saved: {vis_path}")
+                if wandb_active:
+                    epoch_metrics["depth_vis/prediction"] = wandb.Image(str(vis_path))
                 model.train()
 
-            # ── Validation ────────────────────────────────────────────────
-            if epoch % val_every == 0 or epoch == epochs:
+                # Validation
                 metrics = _validate_depth(model, cfg, device)
                 log.info(f"  Val | d1={metrics['delta1']:.4f} "
                          f"RMSE={metrics['rmse']:.4f} "
                          f"REL={metrics['rel']:.4f}")
+                if metrics.get("delta1", 0) > best_delta1:
+                    best_delta1 = metrics["delta1"]
                 best_metrics = metrics
 
                 if wandb_active:
-                    import wandb
-                    wandb.log({f"val/{k}": v for k, v in metrics.items()})
+                    for k, v in metrics.items():
+                        epoch_metrics[f"val/{k}"] = v
+                    epoch_metrics["epoch/best_delta1"] = best_delta1
+
+            # ── Single epoch-level wandb.log ───────────────────────────
+            if wandb_active:
+                wandb.log(epoch_metrics)
 
             # ── Check graceful stop ───────────────────────────────────
             if _stop_requested:
@@ -614,16 +715,21 @@ def finetune_depth(cfg: DictConfig) -> dict:
                               epochs, history)
         log.info(f"Final model saved: {final_path}")
 
-        # Final depth visualization
-        from src.evaluation import visualize_depth_inline
-        vis_path = visualize_depth_inline(
-            model, variant, epochs, out_dir="plots", device=device)
-        log.info(f"Final depth visualization: {vis_path}")
+    # ── Final loss curves (upload to wandb) ───────────────────────────
+    if history["total"]:
+        _plot_depth_loss_curves(history, variant, wandb_active)
 
+    # ── wandb run summary ─────────────────────────────────────────────
     if wandb_active:
         import wandb
+        total_time_min = (time.time() - train_start_time) / 60.0
+        wandb.run.summary["final_loss"] = history["total"][-1] if history["total"] else None
+        wandb.run.summary["best_delta1"] = best_delta1
+        wandb.run.summary["best_rmse"] = best_metrics.get("rmse")
+        wandb.run.summary["total_epochs"] = last_completed_epoch
+        wandb.run.summary["total_time_min"] = total_time_min
+        wandb.run.summary["pretrained"] = bool(ft_cfg.get("pretrained_encoder"))
         wandb.finish()
-
 
     return {"history": history, "best_metrics": best_metrics}
 
@@ -652,7 +758,7 @@ def _validate_depth(model, cfg, device) -> dict:
     return avg
 
 
-def _plot_depth_loss_curves(history: dict, variant: str):
+def _plot_depth_loss_curves(history: dict, variant: str, wandb_active: bool = False):
     """Save depth fine-tuning loss curves."""
     import matplotlib.pyplot as plt
 
@@ -688,3 +794,7 @@ def _plot_depth_loss_curves(history: dict, variant: str):
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     log.info(f"Depth loss curves saved: {out_path}")
     plt.close(fig)
+
+    if wandb_active:
+        import wandb
+        wandb.log({"plots/depth_loss_curves": wandb.Image(str(out_path))})
