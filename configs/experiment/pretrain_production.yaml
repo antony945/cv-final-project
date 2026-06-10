@@ -8,18 +8,18 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 47584 # full NYU Depth V2 train set
+  n_samples: 10000 # or put 50000 for the full NYU Depth V2 train set
   use_cache: false
   use_mmap: true
 
-epochs: 400 # paper doesnt suggest number of epochs, but minimal example use up to 800
+epochs: 800 # paper doesnt suggest number of epochs, but minimal example use up to 800
 bs: 128 # suggested by original paper, can go also to 256
 lr: 2e-3 # learning rate (scale with BS: lr = 2e-3 × bs/256)
 weight_decay: 0.01 # AdamW weight decay — paper recommends {1e-1, 1e-2, 1e-5}
 lr_min: 0.001 # cosine annealing floor (eta_min)
 
 lamb: 0.02 # sigreg weight, paper suggest 0.05, minimal example in the same report suggests 0.02
-n_views: 4 # augmented views per image, paper divides those into globlal and local, suggesting 2 and 6 respectively = 8, but minimal example suggests 4 mixed views
+n_views: 8 # augmented views per image, paper divides those into globlal and local, suggesting 2 and 6 respectively = 8, but minimal example suggests 4 mixed views
 proj_dim: 16 # projector output dim (paper recommends that even with just 16 yields good results)
 resolution: 128 # square crop size for SSL pre-training, paper suggest resolution 224x224 for global views and 96x96 for local views, but minimal example suggests 128x128 for all views
 

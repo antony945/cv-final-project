@@ -8,7 +8,7 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 10000
+  n_samples: 1000 # or 5k for a more meaningful run (max ~47584 for NYU)
   use_cache: false
   use_mmap: true
 
