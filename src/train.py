@@ -12,10 +12,12 @@ Follows the official LeJEPA minimal example structure:
 import logging
 import signal
 import sys
+import time
 import torch
 import warnings
 from pathlib import Path
 from torch.amp import autocast
+from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm.auto import tqdm
 from omegaconf import DictConfig
@@ -79,19 +81,26 @@ def _init_wandb(cfg: DictConfig):
         return False
     try:
         import wandb
+        run_name = (f"lejepa_{cfg.variant}_lr{cfg.lr}_bs{cfg.bs}"
+                    f"_lam{cfg.lamb}")
         wandb.init(
             project=cfg.wandb_project,
-            name=f"lejepa_{cfg.variant}",
+            name=run_name,
             config={
                 "variant": cfg.variant,
                 "emb_dim": EMB_DIM[cfg.variant],
                 "epochs": cfg.epochs,
                 "batch_size": cfg.bs,
                 "lr": cfg.lr,
+                "lr_min": cfg.lr_min,
+                "weight_decay": cfg.weight_decay,
                 "lambda": cfg.lamb,
                 "proj_dim": cfg.proj_dim,
+                "n_views": cfg.n_views,
+                "n_samples": cfg.data.n_samples,
                 "resolution": cfg.resolution,
                 "device": cfg.device,
+                "compile": cfg.get("compile", False),
             },
         )
         return True
@@ -160,11 +169,17 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     signal.signal(signal.SIGINT, _graceful_handler)
     last_completed_epoch = 0
 
+    train_start_time = time.time()
+    embed_std = 0.0
+
     # ── Training loop ─────────────────────────────────────────────────
     try:
         for epoch in range(1, epochs + 1):
             net.train()
             ep_lejepa = ep_sig = ep_inv = 0.0
+            ep_grad_norm = 0.0
+            last_proj = None
+            epoch_start = time.time()
 
             pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
             for views, _ in pbar:
@@ -176,12 +191,15 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
 
                 opt.zero_grad()
                 loss.backward()
+                grad_norm = clip_grad_norm_(net.parameters(), max_norm=float('inf'))
                 opt.step()
                 scheduler.step()
 
                 ep_lejepa += components["lejepa"]
                 ep_sig += components["sigreg"]
                 ep_inv += components["inv"]
+                ep_grad_norm += grad_norm.item()
+                last_proj = proj.detach()
 
                 pbar.set_postfix(loss=f"{components['lejepa']:.4f}")
 
@@ -191,6 +209,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                         "train/lejepa": components["lejepa"],
                         "train/sigreg": components["sigreg"],
                         "train/inv": components["inv"],
+                        "train/grad_norm": grad_norm.item(),
                     })
 
             # ── Epoch summary ─────────────────────────────────────────
@@ -198,16 +217,45 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             ep_lejepa /= n
             ep_sig /= n
             ep_inv /= n
+            ep_grad_norm /= n
+            epoch_time = time.time() - epoch_start
+            samples_per_sec = len(loader.dataset) / epoch_time
+
+            # Embedding std (collapse indicator)
+            embed_std = last_proj.std(dim=1).mean().item() if last_proj is not None else 0.0
+
             history["lejepa"].append(ep_lejepa)
             history["sigreg"].append(ep_sig)
             history["inv"].append(ep_inv)
             last_completed_epoch = epoch
 
             log.info(f"Epoch {epoch:>3} | lejepa={ep_lejepa:.4f} "
-                     f"sigreg={ep_sig:.4f} inv={ep_inv:.4f}")
+                     f"sigreg={ep_sig:.4f} inv={ep_inv:.4f} "
+                     f"grad_norm={ep_grad_norm:.4f} embed_std={embed_std:.4f}")
+
+            # ── Epoch-level wandb logging ──────────────────────────────
+            if wandb_active:
+                import wandb
+                epoch_metrics = {
+                    "epoch/lejepa": ep_lejepa,
+                    "epoch/sigreg": ep_sig,
+                    "epoch/inv": ep_inv,
+                    "epoch/grad_norm": ep_grad_norm,
+                    "epoch/embed_std": embed_std,
+                    "epoch/lr": scheduler.get_last_lr()[0],
+                    "epoch/time_sec": epoch_time,
+                    "epoch/samples_per_sec": samples_per_sec,
+                    "epoch": epoch,
+                }
+                if device == "cuda":
+                    epoch_metrics["epoch/gpu_mem_gb"] = (
+                        torch.cuda.max_memory_allocated() / 1e9)
+                    torch.cuda.reset_peak_memory_stats()
+                wandb.log(epoch_metrics)
 
             # ── Live loss curves (overwritten each epoch) ─────────────
-            _plot_loss_curves(history, variant)
+            # TODO: Disable wandb for live loss curves
+            _plot_loss_curves(history, variant, False)
 
             # ── Checkpoint ────────────────────────────────────────────
             if epoch % cfg.ckpt_every == 0:
@@ -223,6 +271,10 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                         net.backbone.state_dict(), variant, epoch,
                         out_dir="plots", device=device)
                     log.info(f"PCA visualization saved: {pca_path}")
+                    if wandb_active:
+                        import wandb
+                        wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
+                                   "epoch": epoch})
                 except Exception as e:
                     log.warning(f"PCA visualization failed at epoch {epoch}: {e}")
 
@@ -262,17 +314,29 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                 net.backbone.state_dict(), variant, epochs,
                 out_dir="plots", device=device)
             log.info(f"Final PCA visualization saved: {pca_path}")
+            if wandb_active:
+                import wandb
+                wandb.log({"pca/visualization": wandb.Image(str(pca_path)),
+                           "epoch": epochs})
         except Exception as e:
             log.warning(f"Final PCA visualization failed: {e}")
 
+    # ── wandb run summary ─────────────────────────────────────────────
     if wandb_active:
         import wandb
+        total_time_min = (time.time() - train_start_time) / 60.0
+        wandb.run.summary["final_lejepa_loss"] = history["lejepa"][-1] if history["lejepa"] else None
+        wandb.run.summary["final_sigreg"] = history["sigreg"][-1] if history["sigreg"] else None
+        wandb.run.summary["final_inv"] = history["inv"][-1] if history["inv"] else None
+        wandb.run.summary["final_embed_std"] = embed_std
+        wandb.run.summary["total_epochs"] = last_completed_epoch
+        wandb.run.summary["total_time_min"] = total_time_min
         wandb.finish()
 
     return history
 
 
-def _plot_loss_curves(history: dict, variant: str):
+def _plot_loss_curves(history: dict, variant: str, wandb_active: bool = False):
     """Save a loss curve plot to current working directory (hydra output dir)."""
     import matplotlib.pyplot as plt
 
@@ -303,6 +367,10 @@ def _plot_loss_curves(history: dict, variant: str):
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     log.info(f"Loss curves saved: {out_path}")
     plt.close(fig)
+
+    if wandb_active:
+        import wandb
+        wandb.log({"plots/loss_curves": wandb.Image(str(out_path))})
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

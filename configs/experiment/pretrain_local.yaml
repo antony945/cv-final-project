@@ -8,7 +8,7 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 1000 # or 5k for a more meaningful run (max ~47584 for NYU)
+  n_samples: 10000 # or 5k for a more meaningful run (max ~47584 for NYU)
   use_cache: false
   use_mmap: true
 
@@ -23,5 +23,5 @@ n_views: 4 # augmented views per image, paper divides those into globlal and loc
 proj_dim: 16 # projector output dim (paper recommends that even with just 16 yields good results)
 resolution: 128 # square crop size for SSL pre-training, paper suggest resolution 224x224 for global views and 96x96 for local views, but minimal example suggests 128x128 for all views
 
-ckpt_every: 5
-use_wandb: false
+ckpt_every: 20
+use_wandb: true

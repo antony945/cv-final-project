@@ -8,7 +8,7 @@ compile: true
 
 data:
   dataset: nyu
-  n_samples: 10000 # or put 50000 for the full NYU Depth V2 train set
+  n_samples: 50000 # or put 50000 for the full NYU Depth V2 train set
   use_cache: false
   use_mmap: true
 
@@ -23,5 +23,5 @@ n_views: 8 # augmented views per image, paper divides those into globlal and loc
 proj_dim: 16 # projector output dim (paper recommends that even with just 16 yields good results)
 resolution: 128 # square crop size for SSL pre-training, paper suggest resolution 224x224 for global views and 96x96 for local views, but minimal example suggests 128x128 for all views
 
-ckpt_every: 25
+ckpt_every: 20
 use_wandb: true
