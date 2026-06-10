@@ -24,7 +24,7 @@ data:
 epochs: 50
 bs: 64 # batch size (images per step)
 lr: 2e-3 # learning rate (scale with BS: lr = 2e-3 × bs/256)
-weight_decay: 0.01 # AdamW weight decay — paper recommends {1e-1, 1e-2, 1e-5}
+weight_decay: 0.05 # AdamW weight decay — minimal example uses 5e-2
 lr_min: 0.001 # cosine annealing floor (eta_min) — how low lr decays to
 lamb: 0.02 # λ — SIGReg weight (the only LeJEPA hyperparameter)
 n_views: 4 # augmented views per image

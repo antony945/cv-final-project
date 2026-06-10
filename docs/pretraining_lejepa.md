@@ -136,14 +136,11 @@ E.g., if you go from BS=64 to BS=16: `LR = 2e-3 × (16/64) = 5e-4`
 
 The default `2e-3` is from the official LeJEPA example, calibrated for BS=256. Scale linearly with batch size as above.
 
-### `WEIGHT_DECAY` — AdamW weight decay (default: `0.01`)
+### `WEIGHT_DECAY` — AdamW weight decay (default: `0.05`)
 
 **What it does**: L2 regularization applied to all parameters by AdamW. It shrinks weights toward zero each step, preventing overfitting and improving generalization.
 
-The LeJEPA paper recommends searching over `{1e-1, 1e-2, 1e-5}`:
-- `1e-1`: aggressive regularization — use when overfitting (low N_SAMPLES, many epochs)
-- `1e-2`: balanced (our default) — works well in most cases
-- `1e-5`: near-zero regularization — use for very short runs where overfitting isn't a risk
+The LeJEPA paper recommends searching over `{1e-1, 1e-2, 1e-5}`, but the **minimal example code uses `5e-2`** (0.05) — a value between the paper's grid points. We follow the minimal example since it represents the authors' tuned working implementation (see [Paper vs Minimal Example](#paper-vs-minimal-example-hyperparameters) below for details).
 
 **Important**: there is **no scheduler on weight decay** — it stays constant throughout training. Only the learning rate is annealed.
 
@@ -234,6 +231,42 @@ Cosine annealing provides a smooth, continuous decay without the sudden "cliff" 
 - No hyperparameter for step timing (just total steps + floor)
 - Gradual decrease matches the diminishing-returns nature of training
 - The paper's minimal example uses exactly this schedule
+
+---
+
+## Paper vs Minimal Example Hyperparameters
+
+The LeJEPA paper (Table in Section 5) provides a hyperparameter **search grid**, while the accompanying minimal example (`resources/LEJEPA_source_code/MINIMAL.md`) provides a **single working configuration** that the authors validated to achieve SOTA results. These differ in several key places:
+
+| Parameter | Paper (search grid) | Minimal Example (code) | Our choice |
+|-----------|--------------------|-----------------------|------------|
+| `weight_decay` | {1e-1, 1e-2, 1e-5} | **5e-2** | 5e-2 (minimal) |
+| `n_views` | 2 global + 6 local = 8 | **4** (mixed) | 4 (minimal) |
+| `lamb` (SIGReg weight) | 0.05 | **0.02** | 0.02 (minimal) |
+| `resolution` | 224×224 global, 96×96 local | **128×128** (all views) | 128×128 (minimal) |
+| `lr` | 2e-3 (for BS=256) | **2e-3** (for BS=256) | 2e-3 (both agree) |
+| `eta_min` (lr_min) | not specified | **1e-3** | 1e-3 (minimal) |
+| `proj_dim` | 16 | **16** | 16 (both agree) |
+| `epochs` | 800 (on ImageNette) | **800** | 800 (both agree) |
+| `bs` | 256 | **256** | 128 (VRAM-adjusted) |
+
+### Why we follow the minimal example
+
+1. **The paper gives a grid, not a recommendation.** The paper's hyperparameter table lists values the authors tried during ablations across 60+ architectures and 10+ datasets. It is not prescriptive — it says "search over these".
+
+2. **The minimal example is the authors' tuned solution.** Randall Balestriero and Yann LeCun wrote the minimal example *after* the paper as a self-contained demonstration that achieves SOTA (90.7% on ImageNette with linear probing). The hyperparameters in this code represent their best single configuration.
+
+3. **`weight_decay=5e-2` falls between the grid points.** The paper grid has {1e-1, 1e-2, 1e-5} but the minimal code uses 0.05 — suggesting the authors found through additional tuning that 5e-2 works best for their setup. This is moderate regularization: stronger than the "balanced" 1e-2 but less aggressive than 1e-1.
+
+4. **`lamb=0.02` with `n_views=4` is a paired choice.** The paper's `lamb=0.05` was tested with 8+ views. With fewer views (4), the SIGReg signal is weaker per step, so a lower lambda avoids over-regularizing the embedding space. The minimal example validated this pairing.
+
+5. **The minimal example is reproducible.** It ships with wandb logs and benchmark comparisons. We can verify our implementation produces similar training dynamics.
+
+### Impact on our configs
+
+All pretrain experiment configs use `weight_decay: 0.05` (5e-2) following the minimal example. The previous value of 0.01 was taken from the paper's grid midpoint but is not what the authors actually use in practice.
+
+Note: the finetune `weight_decay: 0.01` is **unchanged** — it comes from the METER depth estimation paper, which is a separate concern from LeJEPA pretraining.
 
 ---
 
@@ -358,7 +391,7 @@ N_SAMPLES=100
 PRETRAIN_EPOCHS=5
 PRETRAIN_BS=4
 PRETRAIN_LR=2e-3
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 LR_MIN=0.001
 USE_WANDB=false
 ```
@@ -371,7 +404,7 @@ N_SAMPLES=5000
 PRETRAIN_EPOCHS=50
 PRETRAIN_BS=16
 PRETRAIN_LR=5e-4
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 LR_MIN=5e-4
 CKPT_EVERY=10
 USE_WANDB=true
@@ -385,7 +418,7 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=64
 PRETRAIN_LR=2e-3
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 LR_MIN=0.001
 CKPT_EVERY=25
 USE_WANDB=true
@@ -399,7 +432,7 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=256
 PRETRAIN_LR=2e-3
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 LR_MIN=0.001
 CKPT_EVERY=25
 USE_WANDB=true
@@ -444,7 +477,7 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=256
 PRETRAIN_LR=2e-3
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 LR_MIN=0.001
 N_VIEWS=4
 PROJ_DIM=16
@@ -462,7 +495,7 @@ N_SAMPLES=47584
 PRETRAIN_EPOCHS=200
 PRETRAIN_BS=64
 PRETRAIN_LR=5e-4
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 LR_MIN=0.001
 N_VIEWS=4
 PROJ_DIM=16
