@@ -25,7 +25,6 @@ finetune:
   lamb3: 1.0
   freeze_encoder_epochs: 0
   pretrained_encoder: null
-  val_every: 5
 
 ckpt_every: 5
 use_wandb: false

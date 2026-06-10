@@ -49,7 +49,6 @@ finetune:
   freeze_encoder_epochs: 0 # 0 = train end-to-end from start
   pretrained_encoder: null # path to LeJEPA checkpoint (optional)
   resume: null # path to full checkpoint for resume training
-  val_every: 5 # validate every N epochs
 
 # ── Experiment tracking ────────────────────────────────────────────────
 use_wandb: false
