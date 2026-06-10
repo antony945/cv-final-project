@@ -142,7 +142,7 @@ The scheduler warms up from `0.01 × LR` over 1 epoch, then cosine-decays to `1e
 
 ## Model parameters
 
-### `VARIANT` — MobileViT size (default: `xxs`)
+### `VARIANT` — METER encoder size (default: `xxs`)
 
 | Variant | Params | emb_dim | VRAM (+projector) | Notes |
 |---------|--------|---------|-------------------|-------|
@@ -218,7 +218,7 @@ outputs/xxs_2026-06-05_17-41-30/
 └── main.log
 ```
 
-This lets you visually track how features evolve during training without manually running `visualize.py`. The auto-PCA uses 4 validation images (fewer than the standalone 6) for speed.
+This lets you visually track how features evolve during training without manually running `pca_visualization.py`. The auto-PCA uses 4 validation images (fewer than the standalone 6) for speed.
 
 If PCA fails for any reason (e.g., dataset not cached), training continues normally — it's wrapped in a try/except and logs a warning.
 

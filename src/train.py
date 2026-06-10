@@ -1,4 +1,4 @@
-"""LeJEPA pre-training loop for MobileViT encoder.
+"""LeJEPA pre-training loop for METER encoder.
 
 Follows the official LeJEPA minimal example structure:
 - AdamW optimizer, weight_decay=5e-2
@@ -23,10 +23,10 @@ from omegaconf import DictConfig
 log = logging.getLogger(__name__)
 
 from src.config import DEVICE as _AUTO_DEVICE, EMB_DIM
-from src.model import MobileViTLeJEPA
-from src.loss import SIGReg, compute_lejepa_loss
+from src.model import METERLeJEPA
+from src.utils import SIGReg, compute_lejepa_loss
 from src.data import get_pretrain_loader
-from src.visualize import visualize_pca_inline
+from src.pca_visualization import visualize_pca_inline
 
 
 def _setup_torch_performance(device: str):
@@ -112,7 +112,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     epochs = cfg.epochs
     device = _resolve_device(cfg)
 
-    log.info(f"LeJEPA Pre-training: MobileViT-{variant.upper()}")
+    log.info(f"LeJEPA Pre-training: METER-{variant.upper()}")
     log.info(f"Epochs: {epochs} | BS: {cfg.bs} | lambda: {cfg.lamb} | Device: {device}")
 
     _setup_torch_performance(device)
@@ -120,7 +120,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
     wandb_active = _init_wandb(cfg)
 
     # ── Model, loss, optimizer ────────────────────────────────────────
-    net = MobileViTLeJEPA(variant=variant, proj_dim=cfg.proj_dim,
+    net = METERLeJEPA(variant=variant, proj_dim=cfg.proj_dim,
                           resolution=cfg.resolution).to(device)
     if cfg.get("compile", False) and device == "cuda" and sys.platform != "win32":
         net = torch.compile(net, mode="reduce-overhead")
@@ -221,7 +221,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
                 try:
                     pca_path = visualize_pca_inline(
                         net.backbone.state_dict(), variant, epoch,
-                        out_dir="pca", device=device)
+                        out_dir="plots", device=device)
                     log.info(f"PCA visualization saved: {pca_path}")
                 except Exception as e:
                     log.warning(f"PCA visualization failed at epoch {epoch}: {e}")
@@ -260,7 +260,7 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
         try:
             pca_path = visualize_pca_inline(
                 net.backbone.state_dict(), variant, epochs,
-                out_dir="pca", device=device)
+                out_dir="plots", device=device)
             log.info(f"Final PCA visualization saved: {pca_path}")
         except Exception as e:
             log.warning(f"Final PCA visualization failed: {e}")
@@ -297,7 +297,7 @@ def _plot_loss_curves(history: dict, variant: str):
     axes[2].set_xlabel("Epoch")
     axes[2].grid(True, alpha=0.3)
 
-    plt.suptitle(f"LeJEPA Training — MobileViT-{variant.upper()}", fontsize=13)
+    plt.suptitle(f"LeJEPA Training — METER-{variant.upper()}", fontsize=13)
     plt.tight_layout()
     out_path = plots_dir / f"loss_curves_{variant}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
@@ -322,7 +322,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
         dict with training history and best metrics.
     """
     from src.model import METERModel
-    from src.loss import BalancedDepthLoss, compute_depth_metrics
+    from src.utils import BalancedDepthLoss, compute_depth_metrics
     from src.data import get_depth_loader
 
     variant = cfg.variant
@@ -332,7 +332,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
     epochs = ft_cfg.epochs
     bs = ft_cfg.get("bs", cfg.get("bs", 8))
 
-    log.info(f"METER Fine-tuning: MobileViT-{variant.upper()}")
+    log.info(f"METER Fine-tuning: METER-{variant.upper()}")
     log.info(f"Resolution: {resolution} | Epochs: {epochs} | BS: {bs} | Device: {device}")
 
     _setup_torch_performance(device)
@@ -495,7 +495,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
                 log.info(f"Checkpoint saved: {ckpt_path}")
 
                 # Depth prediction visualization
-                from src.visualize import visualize_depth_inline
+                from src.evaluation import visualize_depth_inline
                 vis_path = visualize_depth_inline(
                     model, variant, epoch, out_dir="plots", device=device)
                 log.info(f"Depth visualization saved: {vis_path}")
@@ -547,7 +547,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
         log.info(f"Final model saved: {final_path}")
 
         # Final depth visualization
-        from src.visualize import visualize_depth_inline
+        from src.evaluation import visualize_depth_inline
         vis_path = visualize_depth_inline(
             model, variant, epochs, out_dir="plots", device=device)
         log.info(f"Final depth visualization: {vis_path}")
@@ -564,7 +564,7 @@ def finetune_depth(cfg: DictConfig) -> dict:
 def _validate_depth(model, cfg, device) -> dict:
     """Run validation and compute depth metrics."""
     from src.data import get_depth_loader
-    from src.loss import compute_depth_metrics
+    from src.utils import compute_depth_metrics
 
     model.eval()
     val_loader = get_depth_loader(cfg, device=device, split="val")
@@ -614,7 +614,7 @@ def _plot_depth_loss_curves(history: dict, variant: str):
     axes[3].set_xlabel("Epoch")
     axes[3].grid(True, alpha=0.3)
 
-    plt.suptitle(f"METER Depth Fine-tuning — MobileViT-{variant.upper()}", fontsize=13)
+    plt.suptitle(f"METER Depth Fine-tuning — METER-{variant.upper()}", fontsize=13)
     plt.tight_layout()
     out_path = plots_dir / f"depth_loss_curves_{variant}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight")

@@ -13,16 +13,9 @@ from pathlib import Path
 
 from src.config import DEVICE, EMB_DIM
 from src.data import get_pretrain_loader
-from src.model import MobileViTLeJEPA
-from src.loss import SIGReg, compute_lejepa_loss
+from src.model import METERLeJEPA
+from src.utils import SIGReg, compute_lejepa_loss, denorm_imagenet
 from omegaconf import OmegaConf
-
-
-def _denorm_view(t: torch.Tensor) -> np.ndarray:
-    """Undo ImageNet normalization for display."""
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    return (t.cpu() * std + mean).clamp(0, 1).permute(1, 2, 0).numpy()
 
 
 def run_verify(variant: str = "xxs", resolution: int = 128,
@@ -60,7 +53,7 @@ def run_verify(variant: str = "xxs", resolution: int = 128,
         axes[i, 0].axis("off")
         # Remaining columns: augmented views
         for v in range(V):
-            axes[i, v + 1].imshow(_denorm_view(batch_views[i, v]))
+            axes[i, v + 1].imshow(denorm_imagenet(batch_views[i, v]))
             axes[i, v + 1].set_title(f"View {v}" if i == 0 else "")
             axes[i, v + 1].axis("off")
 
@@ -78,8 +71,8 @@ def run_verify(variant: str = "xxs", resolution: int = 128,
     plt.show()
 
     # ── 2. Model forward pass ─────────────────────────────────────────
-    print(f"\n[2/3] Testing model forward pass (MobileViT-{variant.upper()})...")
-    net = MobileViTLeJEPA(variant=variant, proj_dim=proj_dim,
+    print(f"\n[2/3] Testing model forward pass (METER-{variant.upper()})...")
+    net = METERLeJEPA(variant=variant, proj_dim=proj_dim,
                           resolution=resolution).to(DEVICE)
     params = sum(p.numel() for p in net.backbone.parameters())
     print(f"  Backbone parameters: {params:,} ({params/1e6:.2f}M)")

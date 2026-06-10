@@ -1,6 +1,6 @@
 # LeJEPA + METER — Monocular Depth Estimation
 
-Self-supervised pre-training (LeJEPA/SIGReg) + supervised fine-tuning (METER decoder) for monocular depth estimation on NYU Depth V2, using lightweight MobileViT encoder variants.
+Self-supervised pre-training (LeJEPA/SIGReg) + supervised fine-tuning (METER decoder) for monocular depth estimation on NYU Depth V2, using lightweight METER encoder variants (xxs/xs/s).
 
 [nyu kaggle](https://www.kaggle.com/datasets/awsaf49/nyuv2-official-split-dataset/data)
 
@@ -276,10 +276,10 @@ After training, visualize learned features with PCA on validation images:
 
 ```bash
 # Point to any checkpoint (variant is auto-detected from filename)
-uv run python -m src.visualize --checkpoint outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
+uv run python -m src.pca_visualization --checkpoint outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
 
-# Explicitly set variant and number of images
-uv run python -m src.visualize --checkpoint path/to/checkpoint.pth --variant xs --n-images 8
+# Explicitly set variant, number of images, and resolution
+uv run python -m src.pca_visualization --checkpoint path/to/checkpoint.pth --variant xs --n-images 8 --resolution 192 256
 ```
 
 The output PCA grid is saved to `outputs/pca_{variant}.png` in the current directory.
@@ -327,12 +327,12 @@ All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: fal
 │   ├── config.py                # device + HF secrets + dataset paths
 │   ├── data.py                  # NYU dataset + augmentation + mmap loader
 │   ├── preprocess.py            # one-time tar/h5 → memory-mapped .npy conversion
-│   ├── model.py                 # MobileViT encoder + METER decoder
-│   ├── loss.py                  # SIGReg + Balanced Depth Loss + metrics
+│   ├── model.py                 # METER encoder + decoder + LeJEPA wrapper
+│   ├── utils.py                 # SIGReg + Balanced Depth Loss + metrics + shared helpers
 │   ├── train.py                 # training loops (pretrain + finetune + resume)
-│   ├── evaluation.py            # standalone depth evaluation CLI
+│   ├── evaluation.py            # depth evaluation + depth visualization
 │   ├── verify.py                # sanity checks
-│   └── visualize.py             # PCA + depth prediction visualization
+│   └── pca_visualization.py     # PCA feature visualization (LeJEPA probing)
 ├── docs/
 │   ├── architecture.md          # encoder + decoder architecture details
 │   └── training_and_evaluation.md  # full training & eval methodology

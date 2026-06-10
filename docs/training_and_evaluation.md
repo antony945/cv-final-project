@@ -19,12 +19,12 @@ After training, the model is evaluated using standard depth estimation metrics o
 
 ### Objective
 
-Train the MobileViT encoder to produce spatially coherent feature maps that capture 3D geometry, without any depth labels. The learned representations transfer to downstream depth estimation.
+Train the METER encoder to produce spatially coherent feature maps that capture 3D geometry, without any depth labels. The learned representations transfer to downstream depth estimation.
 
 ### Method: LeJEPA with SIGReg
 
 - **Input**: V augmented views of each image (default V=4)
-- **Architecture**: MobileViT encoder → AdaptiveAvgPool → 3-layer MLP projector → 16-dim embeddings
+- **Architecture**: METER encoder → AdaptiveAvgPool → 3-layer MLP projector → 16-dim embeddings
 - **Loss**: LeJEPA invariance loss + λ × SIGReg regularizer
   - **Invariance**: L2 distance between projected embeddings of different views (should decrease)
   - **SIGReg**: Prevents representation collapse by encouraging the covariance matrix of embeddings to have log-eigenvalues close to 0 (neither too large nor too small)
@@ -90,7 +90,7 @@ Input RGB (3, H, W)
     │
     ▼
 ┌──────────────────────────┐
-│   MobileViT Encoder      │  ← Pre-trained (or from scratch)
+│   METER Encoder           │  ← Pre-trained (or from scratch)
 │   Outputs:                │
 │   - feat (C, H/32, W/32) │
 │   - skips [y0, y1, y2, y3]│
@@ -254,10 +254,10 @@ uv run python -m src.evaluation \
 Visualize encoder representations without depth prediction:
 
 ```bash
-uv run python -m src.visualize --checkpoint path/to/lejepa_xxs_final.pth
+uv run python -m src.pca_visualization --checkpoint path/to/lejepa_xxs_final.pth
 ```
 
-Generates PCA projections of skip connection features at 3 scales (H/4, H/8, H/16).
+Generates PCA projections of encoder features at 2 scales (y3 at H/16, feat at H/32), upsampled to display resolution.
 
 ---
 
