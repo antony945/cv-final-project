@@ -15,7 +15,7 @@ data:
       depth_shift: 0.1
 
 epochs: 800 # paper doesnt suggest number of epochs, but minimal example use up to 800
-bs: 128 # suggested by original paper, can go also to 256
+bs: 256 # suggested by original paper, can go also to 256
 lr: 2e-3 # learning rate (scale with BS: lr = 2e-3 × bs/256)
 weight_decay: 0.05 # AdamW weight decay — minimal example uses 5e-2
 lr_min: 0.001 # cosine annealing floor (eta_min)
