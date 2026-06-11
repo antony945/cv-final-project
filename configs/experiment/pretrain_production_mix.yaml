@@ -11,14 +11,14 @@ data:
   use_cache: false
   datasets:
     nyu:
-      n_samples: 47584 # full NYU training set
+      n_samples: 50000 # 47584 full NYU training set
       depth_shift: 0.1
     kitti:
-      n_samples: 23000 # Eigen train ~23k valid pairs
+      n_samples: 30000 # Eigen train ~23k valid pairs
       depth_shift: 1.0
       resolution: [192, 640] # mmap resolution for KITTI
 
-epochs: 800
+epochs: 300
 bs: 128
 lr: 2e-3
 weight_decay: 0.05

@@ -112,7 +112,7 @@ uv run python -m src.pca_visualization --checkpoint outputs/pretrain/xxs_.../che
 Train the full model (encoder + decoder) for monocular depth prediction, initializing from the pre-trained encoder:
 
 ```bash
-uv run python -m src.main +experiment=finetune_production \
+uv run python -m src.main +experiment=finetune_production_nyu \
     finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
 ```
 
@@ -220,7 +220,7 @@ print(f'RGB: {rgb.shape} {rgb.dtype}')    # (N, 192, 256, 3) uint8
 After preprocessing, you can train on all samples with minimal RAM:
 
 ```bash
-uv run python -m src.main +experiment=finetune_production
+uv run python -m src.main +experiment=finetune_production_nyu
 ```
 
 ## Training
@@ -257,10 +257,10 @@ Trains encoder + decoder for monocular depth prediction with Balanced Loss Funct
 uv run python -m src.main +experiment=finetune_test
 
 # Full METER training on NYU (60 epochs, bs=128)
-uv run python -m src.main +experiment=finetune_production
+uv run python -m src.main +experiment=finetune_production_nyu
 
 # Custom variant
-uv run python -m src.main +experiment=finetune_production variant=xs
+uv run python -m src.main +experiment=finetune_production_nyu variant=xs
 ```
 
 #### Using a pre-trained LeJEPA encoder
@@ -268,7 +268,7 @@ uv run python -m src.main +experiment=finetune_production variant=xs
 After pre-training with LeJEPA/SIGReg, you can initialize the METER encoder with those weights instead of training from scratch:
 
 ```bash
-uv run python -m src.main +experiment=finetune_production \
+uv run python -m src.main +experiment=finetune_production_nyu \
     finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
 ```
 
@@ -279,7 +279,7 @@ The encoder weights are loaded from the LeJEPA checkpoint and used as the starti
 When using a pre-trained encoder, you can optionally **freeze** it for the first N epochs so only the decoder trains initially:
 
 ```bash
-uv run python -m src.main +experiment=finetune_production \
+uv run python -m src.main +experiment=finetune_production_nyu \
     finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth \
     finetune.freeze_encoder_epochs=10
 ```
@@ -310,7 +310,7 @@ After epoch N, the encoder is automatically unfrozen and the optimizer is re-cre
 Fine-tuning saves **full-state checkpoints** (model + optimizer + scheduler + epoch + loss history + RNG state) at regular intervals and on interrupt. To resume from where training stopped:
 
 ```bash
-uv run python -m src.main +experiment=finetune_production \
+uv run python -m src.main +experiment=finetune_production_nyu \
     finetune.resume=outputs/finetune/xxs_2026-06-08_21-09-28/checkpoints/meter_xxs_epoch10.pth
 ```
 
@@ -440,15 +440,15 @@ Outputs:
 
 | Config | Task | Use case |
 |--------|------|----------|
-| `+experiment=pretrain_test` | pretrain | 40 epochs, 100 samples — sanity check |
-| `+experiment=pretrain_local` | pretrain | 200 epochs, 5k samples — local GPU |
-| `+experiment=pretrain_production` | pretrain | 200 epochs, full dataset, BS=256 — A100 |
-| `+experiment=pretrain_mixed` | pretrain | 800 epochs, NYU+KITTI combined — A100 |
-| `+experiment=finetune_test` | finetune | 2 epochs, 50 samples — sanity check |
+| `+experiment=pretrain_test` | pretrain | 100 epochs, 100 samples — sanity check |
+| `+experiment=pretrain_local` | pretrain | 300 epochs, 10k samples — local GPU |
+| `+experiment=pretrain_production` | pretrain | 300 epochs, full dataset, BS=256 — A100 |
+| `+experiment=pretrain_production_mix` | pretrain | 300 epochs, NYU+KITTI combined — A100 |
+| `+experiment=finetune_test` | finetune | 100 epochs, 100 samples — sanity check |
 | `+experiment=finetune_local` | finetune | 60 epochs, 10k samples — local GPU |
-| `+experiment=finetune_production` | finetune | 60 epochs, full NYU — production |
-| `+experiment=finetune_production_kitti` | finetune | 60 epochs, KITTI Eigen split |
-| `+experiment=finetune_production_lejepa` | finetune | 60 epochs, NYU + LeJEPA encoder |
+| `+experiment=finetune_production_nyu` | finetune | 60 epochs, full NYU — production |
+| `+experiment=finetune_production_nyu_lejepa` | finetune | 60 epochs, NYU + LeJEPA encoder |
+| `+experiment=finetune_production_kitti_lejepa` | finetune | 60 epochs, KITTI + LeJEPA encoder |
 
 All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: false` by default.
 
