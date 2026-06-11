@@ -81,7 +81,13 @@ def _init_wandb_pretrain(cfg: DictConfig):
         return False
     try:
         import wandb
-        run_name = (f"lejepa_{cfg.variant}_lr{cfg.lr}_bs{cfg.bs}"
+        # Build dataset tag: e.g. "nyu50k" or "nyu50k+kitti30k"
+        ds_parts = []
+        for ds_name, ds_cfg in cfg.data.datasets.items():
+            n = ds_cfg.get("n_samples", 0)
+            ds_parts.append(f"{ds_name}{n // 1000}k" if n >= 1000 else f"{ds_name}{n}")
+        ds_tag = "+".join(ds_parts)
+        run_name = (f"lejepa_{cfg.variant}_{cfg.epochs}ep_{ds_tag}_bs{cfg.bs}"
                     f"_lam{cfg.lamb}")
         wandb.init(
             project=cfg.wandb_project,
@@ -401,7 +407,14 @@ def _init_wandb_finetune(cfg: DictConfig):
         ft_cfg = cfg.finetune
         pretrained = ft_cfg.get("pretrained_encoder")
         freeze_n = ft_cfg.get("freeze_encoder_epochs", 0)
-        run_name = (f"meter_{cfg.variant}_lr{ft_cfg.lr}_bs{ft_cfg.get('bs', cfg.get('bs', 8))}"
+        # Build dataset tag: e.g. "nyu50k" or "nyu50k+kitti30k"
+        ds_parts = []
+        for ds_name, ds_cfg in cfg.data.datasets.items():
+            n = ds_cfg.get("n_samples", 0)
+            ds_parts.append(f"{ds_name}{n // 1000}k" if n >= 1000 else f"{ds_name}{n}")
+        ds_tag = "+".join(ds_parts)
+        bs = ft_cfg.get('bs', cfg.get('bs', 8))
+        run_name = (f"meter_{cfg.variant}_{ft_cfg.epochs}ep_{ds_tag}_bs{bs}"
                     f"_freeze{freeze_n}_{'pretrained' if pretrained else 'scratch'}")
         wandb.init(
             project=cfg.wandb_project,
