@@ -19,6 +19,8 @@ HF_OFFLINE: bool = str(os.getenv("HF_OFFLINE", "false")).lower() in ("1", "true"
 # ── Dataset paths (set to use local tar files instead of HuggingFace) ──
 NYU_DATASET_PATH: str | None = os.getenv("NYU_DATASET_PATH")
 NYU_MMAP_DIR: str = os.getenv("NYU_MMAP_DIR", "datasets/nyu_mmap")
+KITTI_DATASET_PATH: str | None = os.getenv("KITTI_DATASET_PATH")
+KITTI_MMAP_DIR: str = os.getenv("KITTI_MMAP_DIR", "datasets/kitti_mmap")
 
 
 def get_nyu_dataset_path() -> str | None:
@@ -26,9 +28,19 @@ def get_nyu_dataset_path() -> str | None:
     return os.getenv("NYU_DATASET_PATH")
 
 
+def get_kitti_dataset_path() -> str | None:
+    """Read KITTI_DATASET_PATH at call time (supports dynamic env var changes)."""
+    return os.getenv("KITTI_DATASET_PATH", "datasets/kitti")
+
+
 def get_nyu_mmap_dir() -> str:
     """Read NYU_MMAP_DIR at call time (supports dynamic env var changes)."""
     return os.getenv("NYU_MMAP_DIR", "datasets/nyu_mmap")
+
+
+def get_kitti_mmap_dir() -> str:
+    """Read KITTI_MMAP_DIR at call time (supports dynamic env var changes)."""
+    return os.getenv("KITTI_MMAP_DIR", "datasets/kitti_mmap")
 
 
 # ── Model constants (architecture-defined, not hyperparams) ────────────

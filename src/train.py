@@ -98,7 +98,7 @@ def _init_wandb_pretrain(cfg: DictConfig):
                 "lambda": cfg.lamb,
                 "proj_dim": cfg.proj_dim,
                 "n_views": cfg.n_views,
-                "n_samples": cfg.data.n_samples,
+                "datasets": list(cfg.data.datasets.keys()),
                 "resolution": cfg.resolution,
                 "device": cfg.device,
                 "compile": cfg.get("compile", False),
@@ -221,8 +221,8 @@ def pretrain_lejepa(cfg: DictConfig) -> dict:
             n = len(loader)
             if n == 0:
                 raise RuntimeError(
-                    f"DataLoader produced 0 batches (n_samples={cfg.data.n_samples}, "
-                    f"bs={cfg.bs}, drop_last=True). Increase n_samples or decrease bs."
+                    f"DataLoader produced 0 batches (bs={cfg.bs}, drop_last=True). "
+                    f"Increase n_samples or decrease bs."
                 )
             ep_lejepa /= n
             ep_sig /= n
@@ -422,7 +422,7 @@ def _init_wandb_finetune(cfg: DictConfig):
                 "freeze_encoder_epochs": freeze_n,
                 "pretrained_encoder": bool(pretrained),
                 "resolution": list(ft_cfg.resolution),
-                "n_samples": cfg.data.n_samples,
+                "datasets": list(cfg.data.datasets.keys()),
                 "device": cfg.device,
                 "compile": cfg.get("compile", False),
             },
@@ -659,15 +659,18 @@ def finetune_depth(cfg: DictConfig) -> dict:
 
                 # Depth prediction visualization
                 from src.evaluation import visualize_depth_inline
+                dataset_name = next(iter(cfg.data.datasets))
                 vis_path = visualize_depth_inline(
-                    model, variant, epoch, out_dir="plots", device=device)
+                    model, variant, epoch, out_dir="plots", device=device,
+                    dataset=dataset_name)
                 log.info(f"Depth visualization saved: {vis_path}")
                 if wandb_active:
                     epoch_metrics["depth_vis/prediction"] = wandb.Image(str(vis_path))
                 model.train()
 
                 # Validation
-                metrics = _validate_depth(model, cfg, device)
+                from src.evaluation import validate_depth
+                metrics = validate_depth(model, cfg, device)
                 log.info(f"  Val | d1={metrics['delta1']:.4f} "
                          f"RMSE={metrics['rmse']:.4f} "
                          f"REL={metrics['rel']:.4f}")
@@ -734,30 +737,6 @@ def finetune_depth(cfg: DictConfig) -> dict:
         wandb.finish()
 
     return {"history": history, "best_metrics": best_metrics}
-
-
-@torch.no_grad()
-def _validate_depth(model, cfg, device) -> dict:
-    """Run validation and compute depth metrics."""
-    from src.data import get_depth_loader
-    from src.utils import compute_depth_metrics
-
-    model.eval()
-    val_loader = get_depth_loader(cfg, device=device, split="val")
-
-    all_metrics = []
-    for rgb, depth_gt in val_loader:
-        rgb = rgb.to(device, non_blocking=True)
-        depth_gt = depth_gt.to(device, non_blocking=True)
-        depth_pred = model(rgb)
-        metrics = compute_depth_metrics(depth_pred, depth_gt)
-        all_metrics.append(metrics)
-
-    # Average metrics across batches
-    avg = {}
-    for key in all_metrics[0]:
-        avg[key] = sum(m[key] for m in all_metrics) / len(all_metrics)
-    return avg
 
 
 def _plot_depth_loss_curves(history: dict, variant: str, wandb_active: bool = False):

@@ -1,0 +1,33 @@
+# @package _global_
+# Mixed pre-training on NYU + KITTI RGB (ConcatDataset)
+# Usage: uv run python -m src.main +experiment=pretrain_mixed
+
+task: pretrain
+variant: xxs
+compile: true
+
+data:
+  use_mmap: true
+  use_cache: false
+  datasets:
+    nyu:
+      n_samples: 47584 # full NYU training set
+      depth_shift: 0.1
+    kitti:
+      n_samples: 23000 # Eigen train ~23k valid pairs
+      depth_shift: 1.0
+      resolution: [192, 640] # mmap resolution for KITTI
+
+epochs: 800
+bs: 128
+lr: 2e-3
+weight_decay: 0.05
+lr_min: 0.001
+
+lamb: 0.02
+n_views: 8
+proj_dim: 16
+resolution: 128 # square crop for SSL (both datasets get random-crop to 128x128)
+
+ckpt_every: 20
+use_wandb: true

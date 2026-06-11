@@ -7,10 +7,12 @@ variant: xxs
 compile: true
 
 data:
-  dataset: nyu
-  n_samples: 50000 # 47584 full NYU training set
-  use_cache: false
   use_mmap: true
+  use_cache: false
+  datasets:
+    nyu:
+      n_samples: 50000 # 47584 full NYU training set
+      depth_shift: 0.1
 
 finetune:
   resolution: [192, 256]

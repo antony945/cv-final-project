@@ -7,10 +7,12 @@ variant: xxs
 compile: true
 
 data:
-  dataset: nyu
-  n_samples: 10000
-  use_cache: false
   use_mmap: true
+  use_cache: false
+  datasets:
+    nyu:
+      n_samples: 10000
+      depth_shift: 0.1
 
 finetune:
   resolution: [192, 256]

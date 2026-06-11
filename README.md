@@ -1,10 +1,10 @@
 # LeJEPA + METER — Monocular Depth Estimation
 
-Self-supervised pre-training (LeJEPA/SIGReg) + supervised fine-tuning (METER decoder) for monocular depth estimation on NYU Depth V2, using lightweight METER encoder variants (xxs/xs/s).
+Self-supervised pre-training (LeJEPA/SIGReg) + supervised fine-tuning (METER decoder) for monocular depth estimation on NYU Depth V2 and KITTI, using lightweight METER encoder variants (xxs/xs/s).
 
 [nyu kaggle](https://www.kaggle.com/datasets/awsaf49/nyuv2-official-split-dataset/data)
 
-## Setup
+## Quick Start
 
 ### 1. Clone and enter the repository
 
@@ -36,11 +36,99 @@ Edit `.env` and set:
 | `HF_TOKEN` | HuggingFace token (optional, avoids rate limits) |
 | `HF_OFFLINE` | `true` to use local cache only, `false` to stream from HF |
 | `NYU_DATASET_PATH` | Path to local NYU tar archives (e.g. `datasets/nyu`). If set, loads from local `.tar/.h5` files instead of HuggingFace. Relative paths resolve from project root. |
-| `NYU_MMAP_DIR` | Path to preprocessed memory-mapped `.npy` files (default: `datasets/nyu_mmap`). Created by `uv run python -m src.preprocess`. |
+| `NYU_MMAP_DIR` | Path to preprocessed NYU memory-mapped `.npy` files (default: `datasets/nyu_mmap`). |
+| `KITTI_DATASET_PATH` | Path to KITTI raw data (Eigen split files + depth zip). Default: `datasets/kitti`. |
+| `KITTI_MMAP_DIR` | Path to preprocessed KITTI memory-mapped `.npy` files (default: `datasets/kitti_mmap`). |
 
 On first run with HuggingFace, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
 
 Alternatively, place the NYU Depth V2 `.tar` shards (`train-000000.tar`, `train-000001.tar`, ...) in `datasets/nyu/` and set `NYU_DATASET_PATH=datasets/nyu` to skip HuggingFace entirely.
+
+### 4. Download datasets
+
+#### NYU Depth V2
+
+1. Go to [sayakpaul/nyu_depth_v2](https://huggingface.co/datasets/sayakpaul/nyu_depth_v2/tree/main/data) on HuggingFace
+2. Download all `.tar` files (`train-000000.tar`, `train-000001.tar`, ..., `validation-000000.tar`)
+3. Place them in `datasets/nyu/` (or any directory you prefer)
+
+#### KITTI (Eigen Split)
+
+1. Go to [kitti-split-and-eigen-split](https://www.kaggle.com/datasets/qikangdeng/kitti-split-and-eigen-split) on Kaggle
+2. Download:
+   - `eigen_train_files.txt` — training file list
+   - `eigen_test_files.txt` — test file list
+   - `eigen_train_files/` folder (downloaded as `.zip`)
+   - `eigen_test_files/` folder (downloaded as `.zip`)
+3. Place/extract everything into `datasets/kitti/` (or your preferred directory)
+4. Go to [KITTI Depth Prediction Benchmark](https://www.cvlibs.net/datasets/kitti/eval_depth.php?benchmark=depth_prediction)
+5. Download **"Annotated depth maps data set"** (14 GB) — this contains the ground-truth depth maps
+6. Extract into the same `datasets/kitti/` directory
+
+#### Set environment variables
+
+In your `.env` file, point to where you placed the data:
+
+```env
+NYU_DATASET_PATH=datasets/nyu
+NYU_MMAP_DIR=datasets/nyu_mmap
+
+KITTI_DATASET_PATH=datasets/kitti
+KITTI_MMAP_DIR=datasets/kitti_mmap
+```
+
+#### Preprocess
+
+After downloading, run the memory-mapped preprocessor to prepare the data for training:
+
+```bash
+uv run python -m src.preprocess                    # NYU (default)
+uv run python -m src.preprocess --dataset kitti    # KITTI
+uv run python -m src.preprocess --dataset nyu kitti # both at once
+```
+
+Once preprocessing completes, you're ready to train.
+
+#### Pre-train (LeJEPA self-supervised)
+
+Train the encoder on unlabeled RGB images using the LeJEPA/SIGReg objective:
+
+```bash
+uv run python -m src.main +experiment=pretrain_production
+```
+
+This saves the encoder backbone to `outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth`.
+
+#### Visualize pre-trained features (optional)
+
+Check that the encoder learned useful geometry by running PCA visualization:
+
+```bash
+uv run python -m src.pca_visualization --checkpoint outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth --dataset nyu kitti
+```
+
+#### Fine-tune (Depth Estimation)
+
+Train the full model (encoder + decoder) for monocular depth prediction, initializing from the pre-trained encoder:
+
+```bash
+uv run python -m src.main +experiment=finetune_production \
+    finetune.pretrained_encoder=outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
+```
+
+This saves the depth model to `outputs/finetune/xxs_.../checkpoints/meter_xxs_final.pth`.
+
+#### Evaluate
+
+Run full validation and visualize depth predictions:
+
+```bash
+uv run python -m src.evaluation --checkpoint outputs/finetune/xxs_.../checkpoints/meter_xxs_final.pth --dataset nyu kitti
+```
+
+See [Training](#training), [PCA Visualization](#pca-visualization), and [Depth Evaluation](#depth-evaluation) below for full options.
+
+---
 
 ## Data Preprocessing (Memory-Mapped Dataset)
 
@@ -62,15 +150,27 @@ The default data pipeline loads all images into RAM as full-resolution PIL objec
 ### How to preprocess
 
 ```bash
-# Default: resize to 192×256 (the METER paper resolution for NYU)
+# NYU: default 192×256 (the METER paper resolution)
 uv run python -m src.preprocess
+uv run python -m src.preprocess --dataset nyu 192 256   # explicit
 
-# Explicit resolution (height width)
-uv run python -m src.preprocess 192 256
+# KITTI: default 192×640 (wide aspect ratio)
+uv run python -m src.preprocess --dataset kitti
+uv run python -m src.preprocess --dataset kitti 192 640  # explicit
+
+# Both datasets at once
+uv run python -m src.preprocess --dataset nyu kitti
 
 # Force rebuild even if files already exist
 uv run python -m src.preprocess --force
+uv run python -m src.preprocess --dataset nyu kitti --force
 ```
+
+KITTI preprocessing requires:
+- `eigen_train_files.txt` / `eigen_test_files.txt` — Eigen split file lists
+- `data_depth_annotated.zip` — KITTI depth ground truth (16-bit PNG)
+- `eigen_train_files.zip` — RGB images for training (skipped with warning if absent)
+- `eigen_test_files.zip` or `eigen_test_files_only_rgb/` — RGB for validation
 
 The preprocessor uses a **streaming + parallel** architecture:
 - Samples are read one-at-a-time from tar/h5 shards (never loaded all at once into RAM)
@@ -272,36 +372,69 @@ uv run python -m src.verify
 
 ## PCA Visualization
 
-After training, visualize learned features with PCA on validation images:
+After pre-training, visualize learned features with PCA on validation images:
 
 ```bash
-# Point to any checkpoint (variant is auto-detected from filename)
+# NYU only (default — variant auto-detected from filename)
 uv run python -m src.pca_visualization --checkpoint outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth
 
-# Explicitly set variant, number of images, and resolution
-uv run python -m src.pca_visualization --checkpoint path/to/checkpoint.pth --variant xs --n-images 8 --resolution 192 256
+# Multiple datasets at once
+uv run python -m src.pca_visualization --checkpoint path/to/checkpoint.pth --dataset nyu kitti
+
+# Custom variant, images, resolution, and seed
+uv run python -m src.pca_visualization --checkpoint path/to/checkpoint.pth \
+    --variant xs --n-images 8 --resolution 192 256 --seed 123
 ```
 
-The output PCA grid is saved to `outputs/pca_{variant}.png` in the current directory.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--checkpoint` | (required) | Path to backbone `.pth` file |
+| `--variant` | auto-detect | Model variant (xxs/xs/s) |
+| `--n-images` | 4 | Number of images per dataset |
+| `--dataset` | `nyu` | Dataset(s) to visualize (`nyu`, `kitti`, or both) |
+| `--resolution` | dataset default | Override resolution (H W) |
+| `--seed` | 42 | Random seed for image selection |
+
+Outputs one PNG per dataset to `outputs/pca_{variant}_{dataset}.png` and displays them interactively.
 
 ## Depth Evaluation
 
-Evaluate a trained METER model on the NYU validation set:
+Evaluate a trained METER model on NYU and/or KITTI validation sets:
 
 ```bash
-# Quick evaluation (4 images, prints metrics + saves depth grid)
+# Evaluate on NYU (default — full validation + visualization grid)
 uv run python -m src.evaluation --checkpoint path/to/meter_xxs_final.pth
 
-# Full validation set (654 images)
-uv run python -m src.evaluation --checkpoint path/to/meter_xxs_final.pth --full-val
+# Evaluate on both datasets at once
+uv run python -m src.evaluation --checkpoint path/to/meter_xxs_final.pth --dataset nyu kitti
 
-# Custom output path and more images
-uv run python -m src.evaluation --checkpoint path/to/model.pth --n-images 8 --output results/eval.png
+# KITTI only, skip full validation (only evaluate on visualization images)
+uv run python -m src.evaluation --checkpoint path/to/model.pth --dataset kitti --skip-full-val
+
+# More images in the grid, custom seed
+uv run python -m src.evaluation --checkpoint path/to/model.pth --n-images 8 --seed 123
 ```
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--checkpoint` | (required) | Path to METER model `.pth` file |
+| `--variant` | auto-detect | Model variant (xxs/xs/s) |
+| `--n-images` | 4 | Number of images in the visualization grid |
+| `--dataset` | `nyu` | Dataset(s) to evaluate (`nyu`, `kitti`, or both) |
+| `--skip-full-val` | false | Only evaluate on grid images (skip full val set) |
+| `--seed` | 42 | Random seed for image selection |
+
+Per-dataset behavior:
+- **Resolution**: NYU 192×256, KITTI 192×640 (model resolution is overridden at eval time)
+- **Evaluation crop**: none for NYU, Eigen crop for KITTI
+- **Depth range**: 0–10m (NYU), 0–80m (KITTI)
+- **Colormap**: 0–10m (NYU), 0–50m (KITTI)
+
+A model trained on one dataset can be evaluated on the other (cross-dataset evaluation) since the architecture is fully convolutional.
+
 Outputs:
-- **Console**: δ1, δ2, δ3, RMSE, REL, log10 metrics
-- **Image**: 4-column grid (RGB | GT Depth | Predicted | Error map)
+- **Console**: δ1, δ2, δ3, RMSE, REL, log10 metrics per dataset
+- **Images**: 4-column grid per dataset (RGB | GT Depth | Predicted | Error map) saved to `outputs/depth_eval_{variant}_{dataset}.png` and displayed interactively
 
 ## Experiment configs
 
@@ -310,9 +443,12 @@ Outputs:
 | `+experiment=pretrain_test` | pretrain | 40 epochs, 100 samples — sanity check |
 | `+experiment=pretrain_local` | pretrain | 200 epochs, 5k samples — local GPU |
 | `+experiment=pretrain_production` | pretrain | 200 epochs, full dataset, BS=256 — A100 |
+| `+experiment=pretrain_mixed` | pretrain | 800 epochs, NYU+KITTI combined — A100 |
 | `+experiment=finetune_test` | finetune | 2 epochs, 50 samples — sanity check |
 | `+experiment=finetune_local` | finetune | 60 epochs, 10k samples — local GPU |
 | `+experiment=finetune_production` | finetune | 60 epochs, full NYU — production |
+| `+experiment=finetune_production_kitti` | finetune | 60 epochs, KITTI Eigen split |
+| `+experiment=finetune_production_lejepa` | finetune | 60 epochs, NYU + LeJEPA encoder |
 
 All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: false` by default.
 
@@ -325,12 +461,12 @@ All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: fal
 ├── src/
 │   ├── main.py                  # Hydra entry point (pretrain + finetune)
 │   ├── config.py                # device + HF secrets + dataset paths
-│   ├── data.py                  # NYU dataset + augmentation + mmap loader
-│   ├── preprocess.py            # one-time tar/h5 → memory-mapped .npy conversion
+│   ├── data.py                  # NYU + KITTI datasets + augmentation + mmap loader
+│   ├── preprocess.py            # one-time tar/h5/zip → memory-mapped .npy conversion
 │   ├── model.py                 # METER encoder + decoder + LeJEPA wrapper
 │   ├── utils.py                 # SIGReg + Balanced Depth Loss + metrics + shared helpers
 │   ├── train.py                 # training loops (pretrain + finetune + resume)
-│   ├── evaluation.py            # depth evaluation + depth visualization
+│   ├── evaluation.py            # depth evaluation + depth visualization (NYU/KITTI)
 │   ├── verify.py                # sanity checks
 │   └── pca_visualization.py     # PCA feature visualization (LeJEPA probing)
 ├── docs/

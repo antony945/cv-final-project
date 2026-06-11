@@ -22,8 +22,28 @@ from torchvision.transforms import v2
 #  Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-DEFAULT_VIS_RES: tuple[int, int] = (192, 256)  # (H, W) — must be divisible by 32
-DEPTH_VMIN, DEPTH_VMAX = 0.0, 10.0  # NYU depth range in meters
+# Per-dataset defaults for evaluation and visualization
+DATASET_DEFAULTS: dict[str, dict] = {
+    "nyu": {
+        "resolution": (192, 256),
+        "min_depth": 1e-3,
+        "max_depth": 10.0,
+        "eval_crop": "none",
+        "depth_vmin": 0.0,
+        "depth_vmax": 10.0,
+    },
+    "kitti": {
+        "resolution": (192, 640),
+        "min_depth": 1e-3,
+        "max_depth": 80.0,
+        "eval_crop": "eigen",
+        "depth_vmin": 0.0,
+        "depth_vmax": 50.0,
+    },
+}
+
+DEFAULT_VIS_RES: tuple[int, int] = DATASET_DEFAULTS["nyu"]["resolution"]  # (H, W) — must be divisible by 32
+VIS_SEED: int = 42  # Default seed for reproducible image selection in visualizations
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -81,12 +101,18 @@ def pca_feature_map(feat: torch.Tensor, n_components: int = 3,
     return proj, pca_model
 
 
-def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RES):
-    """Load first N samples from NYU validation (RGB + depth GT).
+def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RES,
+                     dataset: str = "nyu", seed: int | None = None):
+    """Load N samples from validation set (RGB + depth GT).
 
-    Always returns the same images for reproducibility across epochs.
-    Uses mmap files if available, otherwise falls back to tar/h5 or HuggingFace.
+    By default loads the first N samples. If seed is provided, selects N random
+    indices (deterministic given the seed) for better dataset coverage.
 
+    Args:
+        n_images: Number of samples to load.
+        resolution: (H, W) target resolution.
+        dataset: "nyu" or "kitti".
+        seed: If provided, randomly sample indices instead of taking the first N.
     Returns:
         rgb_batch: (N, 3, H, W) tensor, ImageNet-normalized.
         depth_batch: (N, 1, H, W) tensor, meters.
@@ -99,11 +125,20 @@ def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RE
     H, W = resolution
 
     # Try mmap first (fastest, consistent with training)
-    if _mmap_files_exist(resolution, "val"):
-        rgb_path = _find_mmap_file("val", "rgb", H, W)
-        depth_path = _find_mmap_file("val", "depth", H, W)
+    if _mmap_files_exist(resolution, "val", dataset=dataset):
+        rgb_path = _find_mmap_file("val", "rgb", H, W, dataset=dataset)
+        depth_path = _find_mmap_file("val", "depth", H, W, dataset=dataset)
         rgb_mmap = np.load(str(rgb_path), mmap_mode="r")
         depth_mmap = np.load(str(depth_path), mmap_mode="r")
+
+        # Determine which indices to load
+        total = rgb_mmap.shape[0]
+        n = min(n_images, total)
+        if seed is not None:
+            rng = np.random.default_rng(seed)
+            indices = sorted(rng.choice(total, size=n, replace=False))
+        else:
+            indices = list(range(n))
 
         rgb_tensors = []
         depth_tensors = []
@@ -112,7 +147,7 @@ def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RE
         mean = np.array([0.485, 0.456, 0.406])
         std = np.array([0.229, 0.224, 0.225])
 
-        for i in range(min(n_images, rgb_mmap.shape[0])):
+        for i in indices:
             rgb_np = np.array(rgb_mmap[i])        # (H, W, 3) uint8
             depth_np = np.array(depth_mmap[i])    # (H, W) float32
 
@@ -128,7 +163,13 @@ def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RE
         depth_batch = torch.stack(depth_tensors)
         return rgb_batch, depth_batch, rgb_display
 
-    # Fallback: load from tar/h5 or HuggingFace
+    # Fallback: load from tar/h5 or HuggingFace (NYU only)
+    if dataset != "nyu":
+        raise FileNotFoundError(
+            f"No mmap val files found for {dataset} at {H}x{W}. "
+            f"Run: uv run python -m src.preprocess --dataset {dataset} {H} {W}"
+        )
+
     nyu_path = get_nyu_dataset_path()
     if nyu_path:
         from src.data import _load_nyu_local
@@ -362,27 +403,46 @@ class BalancedDepthLoss(nn.Module):
 
 
 @torch.no_grad()
-def compute_depth_metrics(pred: torch.Tensor, target: torch.Tensor
+def compute_depth_metrics(pred: torch.Tensor, target: torch.Tensor,
+                          min_depth: float = 1e-3, max_depth: float = 10.0,
+                          eval_crop: str = "none"
                           ) -> dict[str, float]:
     """Compute standard monocular depth estimation metrics.
 
     Args:
         pred: (B, 1, H, W) predicted depth
         target: (B, 1, H, W) ground truth depth
+        min_depth: Minimum valid depth (meters). Predictions/targets below are clamped.
+        max_depth: Maximum valid depth (meters). Pixels with target > max_depth are masked.
+        eval_crop: Crop mode before evaluation:
+            "none" — no crop (NYU default, already center-cropped in data)
+            "eigen" — Eigen crop for KITTI (top 8.2%, bottom 6.5%, left 4.4%, right 1.5%)
+            "garg" — Garg crop (more aggressive, not commonly used)
     Returns:
         dict with δ1, δ2, δ3, rmse, rel, log10
     """
-    mask = target > 0
-    pred_valid = pred[mask]
+    # Apply evaluation crop
+    if eval_crop == "eigen":
+        _, _, h, w = pred.shape
+        crop_h = (int(0.3324324 * h), int(0.91351351 * h))
+        crop_w = (int(0.0359477 * w), int(0.96405229 * w))
+        pred = pred[:, :, crop_h[0]:crop_h[1], crop_w[0]:crop_w[1]]
+        target = target[:, :, crop_h[0]:crop_h[1], crop_w[0]:crop_w[1]]
+    elif eval_crop == "garg":
+        _, _, h, w = pred.shape
+        crop_h = (int(0.40810811 * h), int(0.99189189 * h))
+        crop_w = (int(0.03594771 * w), int(0.96405229 * w))
+        pred = pred[:, :, crop_h[0]:crop_h[1], crop_w[0]:crop_w[1]]
+        target = target[:, :, crop_h[0]:crop_h[1], crop_w[0]:crop_w[1]]
+
+    # Mask: valid depth between min and max
+    mask = (target > min_depth) & (target <= max_depth)
+    pred_valid = pred[mask].clamp(min=min_depth, max=max_depth)
     target_valid = target[mask]
 
     if pred_valid.numel() == 0:
         return {"delta1": 0., "delta2": 0., "delta3": 0.,
                 "rmse": 0., "rel": 0., "log10": 0.}
-
-    # Clamp predictions to avoid division by zero / log(0)
-    pred_valid = pred_valid.clamp(min=1e-3)
-    target_valid = target_valid.clamp(min=1e-3)
 
     # Threshold accuracy (δ)
     ratio = torch.max(pred_valid / target_valid, target_valid / pred_valid)
