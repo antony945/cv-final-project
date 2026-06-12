@@ -452,6 +452,45 @@ Outputs:
 
 All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: false` by default.
 
+## Depth Statistics
+
+Compute depth statistics from your preprocessed mmap files to inspect data distribution and validate `depth_bias` settings:
+
+```bash
+uv run python -m src.depth_stats                   # all datasets
+uv run python -m src.depth_stats --dataset nyu     # NYU only
+uv run python -m src.depth_stats --dataset kitti   # KITTI only
+uv run python -m src.depth_stats --max-samples 500 # limit samples for speed
+```
+
+Reports per-file: fill rate, mean, median, std, min/max, and percentiles (10th–90th). Also suggests an appropriate `depth_bias` value (median depth).
+
+### KITTI sparse depth maps
+
+KITTI ground-truth depth is projected from LiDAR point clouds, resulting in **sparse depth maps** with only ~15–25% valid pixels. Invalid pixels are stored as `depth = 0`.
+
+This has several implications for training and evaluation:
+
+| Aspect | How it's handled |
+|--------|-----------------|
+| **Training loss** | `mask = (target > 0)` — all loss terms (L1, gradient, normal, SSIM) are computed only on valid pixels |
+| **Augmentation** | `depth_shift = ±1.0m` — cannot make valid KITTI pixels invalid (min valid depth ≈ 2m) |
+| **Evaluation metrics** | Only valid pixels within `[min_depth, max_depth]` after Eigen crop are evaluated |
+| **Visualization** | Invalid pixels are rendered as white (masked array) — not as depth=0 |
+| **`depth_bias`** | Set to 10.0 (close to median valid depth of ~11.5m). This is the initial output bias — the model learns the full range within a few epochs |
+
+Typical KITTI depth statistics (Eigen split):
+
+```
+Fill rate:  ~16% valid pixels
+Mean:       15.6 m
+Median:     11.5 m
+Std:        11.7 m
+Range:      2.0 – 90.0 m
+```
+
+By contrast, NYU has ~96–100% valid pixels with a median of 1.7–2.5m and range 0–10m.
+
 ## Project structure
 
 ```
@@ -467,6 +506,7 @@ All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: fal
 │   ├── utils.py                 # SIGReg + Balanced Depth Loss + metrics + shared helpers
 │   ├── train.py                 # training loops (pretrain + finetune + resume)
 │   ├── evaluation.py            # depth evaluation + depth visualization (NYU/KITTI)
+│   ├── depth_stats.py           # dataset depth distribution analysis
 │   ├── verify.py                # sanity checks
 │   └── pca_visualization.py     # PCA feature visualization (LeJEPA probing)
 ├── docs/

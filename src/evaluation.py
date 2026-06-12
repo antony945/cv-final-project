@@ -88,24 +88,30 @@ def visualize_depth_inline(model, variant: str, epoch: int,
 
     col_titles = ["RGB", "GT Depth", "Predicted Depth", "Error |GT - Pred|"]
 
+    # Colormaps with black background for masked (invalid) pixels
+    cmap_depth = plt.cm.plasma_r.copy()
+    cmap_depth.set_bad(color="black")
+    cmap_err = plt.cm.hot.copy()
+    cmap_err.set_bad(color="black")
+
     for i in range(n_images):
         axes[i, 0].imshow(rgb_display[i])
         axes[i, 0].axis("off")
 
-        # TODO: for KITTI, visualize GT depth with nearest-neighbor filling to avoid large black invalid regions
-        # For now dont do it, but need to fix
-        # gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
-        gt_vis = depth_gt_np[i]
-        axes[i, 1].imshow(gt_vis, cmap="plasma_r",
+        invalid = depth_gt_np[i] == 0
+        gt_vis = np.ma.masked_where(invalid, depth_gt_np[i])
+        axes[i, 1].imshow(gt_vis, cmap=cmap_depth,
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 1].axis("off")
 
-        axes[i, 2].imshow(depth_pred_np[i], cmap="plasma_r",
+        pred_vis = np.ma.masked_where(invalid, depth_pred_np[i])
+        axes[i, 2].imshow(pred_vis, cmap=cmap_depth,
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 2].axis("off")
 
         diff = np.abs(depth_gt_np[i] - depth_pred_np[i])
-        axes[i, 3].imshow(diff, cmap="hot", vmin=0, vmax=depth_vmax / 2)
+        diff_vis = np.ma.masked_where(invalid, diff)
+        axes[i, 3].imshow(diff_vis, cmap=cmap_err, vmin=0, vmax=depth_vmax / 2)
         axes[i, 3].axis("off")
 
         if i == 0:
@@ -180,21 +186,28 @@ def visualize_depth_standalone(checkpoint: str | Path, variant: str | None = Non
         axes = axes[np.newaxis, :]
 
     col_titles = ["RGB", "GT Depth", "Predicted Depth", "Error |GT - Pred|"]
+
+    # Colormaps with black background for masked (invalid) pixels
+    cmap_depth = plt.cm.plasma_r.copy()
+    cmap_depth.set_bad(color="black")
+    cmap_err = plt.cm.hot.copy()
+    cmap_err.set_bad(color="black")
+
     for i in range(n_images):
         axes[i, 0].imshow(rgb_display[i])
         axes[i, 0].axis("off")
-        # TODO: for KITTI, visualize GT depth with nearest-neighbor filling to avoid large black invalid regions
-        # For now dont do it, but need to fix
-        # gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
-        gt_vis = depth_gt_np[i]
-        axes[i, 1].imshow(gt_vis, cmap="plasma_r",
+        invalid = depth_gt_np[i] == 0
+        gt_vis = np.ma.masked_where(invalid, depth_gt_np[i])
+        axes[i, 1].imshow(gt_vis, cmap=cmap_depth,
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 1].axis("off")
-        axes[i, 2].imshow(depth_pred_np[i], cmap="plasma_r",
+        pred_vis = np.ma.masked_where(invalid, depth_pred_np[i])
+        axes[i, 2].imshow(pred_vis, cmap=cmap_depth,
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 2].axis("off")
         diff = np.abs(depth_gt_np[i] - depth_pred_np[i])
-        axes[i, 3].imshow(diff, cmap="hot", vmin=0, vmax=depth_vmax / 2)
+        diff_vis = np.ma.masked_where(invalid, diff)
+        axes[i, 3].imshow(diff_vis, cmap=cmap_err, vmin=0, vmax=depth_vmax / 2)
         axes[i, 3].axis("off")
         if i == 0:
             for j, title in enumerate(col_titles):
