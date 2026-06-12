@@ -8,11 +8,13 @@ compile: true
 
 data:
   use_mmap: true
-  use_cache: false
   datasets:
     nyu:
       n_samples: 10000
       depth_shift: 0.1
+      min_depth: 0.001
+      max_depth: 10.0
+      eval_crop: none
 
 finetune:
   resolution: [192, 256]
@@ -25,6 +27,7 @@ finetune:
   lamb1: 0.5
   lamb2: 1.0
   lamb3: 1.0
+  depth_bias: 3.0 # indoor scenes (NYU)
   freeze_encoder_epochs: 0
   pretrained_encoder: null
 

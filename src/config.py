@@ -12,23 +12,19 @@ load_dotenv(ROOT / ".env")
 # ── Device ─────────────────────────────────────────────────────────────
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ── HuggingFace secrets ────────────────────────────────────────────────
-HF_TOKEN: str | None = os.getenv("HF_TOKEN")
-HF_OFFLINE: bool = str(os.getenv("HF_OFFLINE", "false")).lower() in ("1", "true", "yes")
-
-# ── Dataset paths (set to use local tar files instead of HuggingFace) ──
-NYU_DATASET_PATH: str | None = os.getenv("NYU_DATASET_PATH")
+# ── Dataset paths ──────────────────────────────────────────────────────
+NYU_DATASET_PATH: str = os.getenv("NYU_DATASET_PATH", "datasets/nyu")
 NYU_MMAP_DIR: str = os.getenv("NYU_MMAP_DIR", "datasets/nyu_mmap")
-KITTI_DATASET_PATH: str | None = os.getenv("KITTI_DATASET_PATH")
+KITTI_DATASET_PATH: str = os.getenv("KITTI_DATASET_PATH", "datasets/kitti")
 KITTI_MMAP_DIR: str = os.getenv("KITTI_MMAP_DIR", "datasets/kitti_mmap")
 
 
-def get_nyu_dataset_path() -> str | None:
+def get_nyu_dataset_path() -> str:
     """Read NYU_DATASET_PATH at call time (supports dynamic env var changes)."""
-    return os.getenv("NYU_DATASET_PATH")
+    return os.getenv("NYU_DATASET_PATH", "datasets/nyu")
 
 
-def get_kitti_dataset_path() -> str | None:
+def get_kitti_dataset_path() -> str:
     """Read KITTI_DATASET_PATH at call time (supports dynamic env var changes)."""
     return os.getenv("KITTI_DATASET_PATH", "datasets/kitti")
 

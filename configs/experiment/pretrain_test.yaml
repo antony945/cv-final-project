@@ -8,11 +8,13 @@ compile: true
 
 data:
   use_mmap: true
-  use_cache: false
   datasets:
     nyu:
       n_samples: 100
       depth_shift: 0.1
+      min_depth: 0.001
+      max_depth: 10.0
+      eval_crop: none
 
 epochs: 100 # paper uses 100 epochs on 1000 samples
 bs: 8 # must be <= n_samples (drop_last=True); paper suggests 128+ for full runs

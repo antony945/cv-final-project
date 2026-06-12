@@ -8,11 +8,13 @@ compile: true
 
 data:
   use_mmap: true
-  use_cache: false
   datasets:
     nyu:
       n_samples: 10000 # or 5k for a more meaningful run (max ~47584 for NYU)
       depth_shift: 0.1
+      min_depth: 0.001
+      max_depth: 10.0
+      eval_crop: none
 
 epochs: 300 # paper doesnt suggest number of epochs, but minimal example use up to 800
 bs: 128 # suggested by original paper, can go also to 256

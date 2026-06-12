@@ -60,9 +60,7 @@ Edit `.env` and set:
 
 | Variable | Description |
 |----------|-------------|
-| `HF_TOKEN` | HuggingFace token (optional, avoids rate limits) |
-| `HF_OFFLINE` | `true` to use local cache only, `false` to stream from HF |
-| `NYU_DATASET_PATH` | Path to local NYU tar archives (e.g. `datasets/nyu`). If set, loads from local `.tar/.h5` files instead of HuggingFace. Relative paths resolve from project root. |
+| `NYU_DATASET_PATH` | Path to local NYU tar archives (default: `datasets/nyu`). Relative paths resolve from project root. |
 | `NYU_MMAP_DIR` | Path to preprocessed NYU memory-mapped `.npy` files (default: `datasets/nyu_mmap`). |
 | `KITTI_DATASET_PATH` | Path to KITTI raw data (Eigen split files + depth zip). Default: `datasets/kitti`. |
 | `KITTI_MMAP_DIR` | Path to preprocessed KITTI memory-mapped `.npy` files (default: `datasets/kitti_mmap`). |
@@ -77,18 +75,15 @@ KITTI_DATASET_PATH=datasets/kitti
 KITTI_MMAP_DIR=datasets/kitti_mmap
 ```
 
-On first run with HuggingFace, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
-
-Alternatively, place the NYU Depth V2 `.tar` shards (`train-000000.tar`, `train-000001.tar`, ...) in `datasets/nyu/` and set `NYU_DATASET_PATH=datasets/nyu` to skip HuggingFace entirely.
-
 ### 5. Preprocess
 
 After downloading, run the memory-mapped preprocessor to prepare the data for training:
 
 ```bash
-uv run python -m src.preprocess                    # NYU (default)
-uv run python -m src.preprocess --dataset kitti    # KITTI
-uv run python -m src.preprocess --dataset nyu kitti # both at once
+uv run python -m src.preprocess                     # both datasets (default)
+uv run python -m src.preprocess --dataset nyu       # NYU only
+uv run python -m src.preprocess --dataset kitti     # KITTI only
+uv run python -m src.preprocess --dataset nyu kitti # explicit both datasets
 ```
 
 Once preprocessing completes, you're ready to train.
@@ -154,20 +149,21 @@ The default data pipeline loads all images into RAM as full-resolution PIL objec
 ### How to preprocess
 
 ```bash
-# NYU: default 192×256 (the METER paper resolution)
+# Both datasets (default): NYU at 192×256, KITTI at 192×640
 uv run python -m src.preprocess
-uv run python -m src.preprocess --dataset nyu 192 256   # explicit
 
-# KITTI: default 192×640 (wide aspect ratio)
+# Single dataset only
+uv run python -m src.preprocess --dataset nyu
 uv run python -m src.preprocess --dataset kitti
-uv run python -m src.preprocess --dataset kitti 192 640  # explicit
 
-# Both datasets at once
-uv run python -m src.preprocess --dataset nyu kitti
+# Explicit resolution override
+uv run python -m src.preprocess --dataset nyu 192 256
+uv run python -m src.preprocess --dataset kitti 192 640
 
 # Force rebuild even if files already exist
 uv run python -m src.preprocess --force
-uv run python -m src.preprocess --dataset nyu kitti --force
+uv run python -m src.preprocess --dataset nyu --force
+uv run python -m src.preprocess --dataset kitti --force
 ```
 
 KITTI preprocessing requires:
@@ -456,6 +452,45 @@ Outputs:
 
 All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: false` by default.
 
+## Depth Statistics
+
+Compute depth statistics from your preprocessed mmap files to inspect data distribution and validate `depth_bias` settings:
+
+```bash
+uv run python -m src.depth_stats                   # all datasets
+uv run python -m src.depth_stats --dataset nyu     # NYU only
+uv run python -m src.depth_stats --dataset kitti   # KITTI only
+uv run python -m src.depth_stats --max-samples 500 # limit samples for speed
+```
+
+Reports per-file: fill rate, mean, median, std, min/max, and percentiles (10th–90th). Also suggests an appropriate `depth_bias` value (median depth).
+
+### KITTI sparse depth maps
+
+KITTI ground-truth depth is projected from LiDAR point clouds, resulting in **sparse depth maps** with only ~15–25% valid pixels. Invalid pixels are stored as `depth = 0`.
+
+This has several implications for training and evaluation:
+
+| Aspect | How it's handled |
+|--------|-----------------|
+| **Training loss** | `mask = (target > 0)` — all loss terms (L1, gradient, normal, SSIM) are computed only on valid pixels |
+| **Augmentation** | `depth_shift = ±1.0m` — cannot make valid KITTI pixels invalid (min valid depth ≈ 2m) |
+| **Evaluation metrics** | Only valid pixels within `[min_depth, max_depth]` after Eigen crop are evaluated |
+| **Visualization** | Invalid pixels are rendered as white (masked array) — not as depth=0 |
+| **`depth_bias`** | Set to 10.0 (close to median valid depth of ~11.5m). This is the initial output bias — the model learns the full range within a few epochs |
+
+Typical KITTI depth statistics (Eigen split):
+
+```
+Fill rate:  ~16% valid pixels
+Mean:       15.6 m
+Median:     11.5 m
+Std:        11.7 m
+Range:      2.0 – 90.0 m
+```
+
+By contrast, NYU has ~96–100% valid pixels with a median of 1.7–2.5m and range 0–10m.
+
 ## Project structure
 
 ```
@@ -471,6 +506,7 @@ All configs use `compile: true`, `data.use_mmap: true`, and `data.use_cache: fal
 │   ├── utils.py                 # SIGReg + Balanced Depth Loss + metrics + shared helpers
 │   ├── train.py                 # training loops (pretrain + finetune + resume)
 │   ├── evaluation.py            # depth evaluation + depth visualization (NYU/KITTI)
+│   ├── depth_stats.py           # dataset depth distribution analysis
 │   ├── verify.py                # sanity checks
 │   └── pca_visualization.py     # PCA feature visualization (LeJEPA probing)
 ├── docs/
