@@ -1,6 +1,6 @@
 """One-time preprocessing: convert dataset data to memory-mapped .npy files.
 
-Supports NYU (tar/h5 or HuggingFace) and KITTI (Eigen split + depth zips).
+Supports NYU (local tar/h5 archives) and KITTI (Eigen split + depth zips).
 Streaming architecture — never loads all samples into RAM at once.
 Uses multiprocess workers for parallel resize.
 
@@ -11,11 +11,11 @@ Creates two files per split (train/val):
          kitti_{split}_depth_{H}x{W}_N{count}.npy → (N, H, W) float32
 
 Usage:
-  uv run python -m src.preprocess                                        # NYU default
+  uv run python -m src.preprocess                                        # both datasets
   uv run python -m src.preprocess --dataset nyu 192 256                  # explicit NYU
   uv run python -m src.preprocess --dataset kitti                        # KITTI default 192x640
   uv run python -m src.preprocess --dataset kitti 192 640                # explicit KITTI
-  uv run python -m src.preprocess --dataset nyu kitti                    # both datasets
+  uv run python -m src.preprocess --dataset nyu kitti                    # explicit both datasets
   uv run python -m src.preprocess --force                                # rebuild
 
 The output directory is controlled by NYU_MMAP_DIR / KITTI_MMAP_DIR env vars.
@@ -43,7 +43,38 @@ log = logging.getLogger(__name__)
 _MAX_WORKERS = min(os.cpu_count() or 1, 8)
 
 
-def _get_output_dir() -> Path:
+# ═══════════════════════════════════════════════════════════════════════════
+#  Common utilities (shared by NYU and KITTI)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _drain_futures(futures: dict, rgb_mmap: np.ndarray, depth_mmap: np.ndarray,
+                   pbar, wait_all: bool = False):
+    """Collect completed futures and write results to mmap."""
+    if wait_all:
+        done = list(as_completed(futures))
+    else:
+        # Wait for at least half to complete
+        done = []
+        for future in as_completed(futures):
+            done.append(future)
+            if len(done) >= len(futures) // 2:
+                break
+
+    for future in done:
+        i = futures.pop(future)
+        rgb_resized, dep_resized = future.result()
+        rgb_mmap[i] = rgb_resized
+        depth_mmap[i] = dep_resized
+        pbar.update(1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  NYU Preprocessing — stream from tar/h5 archives
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _get_nyu_output_dir() -> Path:
     """Resolve output directory for NYU mmap files."""
     from src.config import ROOT, get_nyu_mmap_dir
     mmap_dir = get_nyu_mmap_dir()
@@ -54,23 +85,7 @@ def _get_output_dir() -> Path:
     return p
 
 
-def _get_kitti_output_dir() -> Path:
-    """Resolve output directory for KITTI mmap files."""
-    from src.config import ROOT, get_kitti_mmap_dir
-    mmap_dir = get_kitti_mmap_dir()
-    p = Path(mmap_dir)
-    if not p.is_absolute():
-        p = ROOT / p
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Phase 1: Count samples (fast, no data read)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _count_samples_in_tars(tar_dir: Path, split: str) -> tuple[int, list[str]]:
+def _count_nyu_samples(tar_dir: Path, split: str) -> tuple[int, list[str]]:
     """Count total .h5 members across all tar shards. Returns (count, tar_paths)."""
     pattern = f"{split}-*.tar"
     tar_files = sorted(glob.glob(str(tar_dir / pattern)))
@@ -86,27 +101,7 @@ def _count_samples_in_tars(tar_dir: Path, split: str) -> tuple[int, list[str]]:
     return total, tar_files
 
 
-def _count_samples_in_hf(split: str) -> int:
-    """Count samples in HuggingFace dataset (requires download/cache)."""
-    from datasets import load_dataset
-    from src.config import HF_TOKEN
-
-    hf_split = "validation" if split == "val" else split
-    ds = load_dataset(
-        "sayakpaul/nyu_depth_v2",
-        split=hf_split,
-        trust_remote_code=True,
-        token=HF_TOKEN,
-    )
-    return len(ds)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Worker function (stateless, picklable for multiprocessing)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _resize_sample(h5_bytes: bytes, h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
+def _resize_nyu_sample(h5_bytes: bytes, h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
     """Decode h5 bytes and resize to target resolution. Runs in worker process."""
     with h5py.File(io.BytesIO(h5_bytes), "r") as h5f:
         rgb = np.array(h5f["rgb"])      # (3, H, W) uint8
@@ -125,26 +120,9 @@ def _resize_sample(h5_bytes: bytes, h: int, w: int) -> tuple[np.ndarray, np.ndar
     return rgb_resized, dep_resized
 
 
-def _resize_sample_from_pil(rgb_np: np.ndarray, depth_np: np.ndarray,
-                            h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
-    """Resize already-decoded arrays. Used for HuggingFace path."""
-    rgb_pil = Image.fromarray(rgb_np.astype(np.uint8), mode="RGB")
-    rgb_resized = np.array(rgb_pil.resize((w, h), Image.BILINEAR))
-
-    dep_pil = Image.fromarray(depth_np.astype(np.float32), mode="F")
-    dep_resized = np.array(dep_pil.resize((w, h), Image.BILINEAR))
-
-    return rgb_resized, dep_resized
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Check for existing files (glob-based)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _find_existing(out_dir: Path, split: str, h: int, w: int
-                   ) -> tuple[Path | None, Path | None, int | None]:
-    """Find existing mmap files and extract sample count from filename."""
+def _find_nyu_existing(out_dir: Path, split: str, h: int, w: int
+                       ) -> tuple[Path | None, Path | None, int | None]:
+    """Find existing NYU mmap files and extract sample count from filename."""
     rgb_matches = sorted(out_dir.glob(f"nyu_{split}_rgb_{h}x{w}_N*.npy"))
     depth_matches = sorted(out_dir.glob(f"nyu_{split}_depth_{h}x{w}_N*.npy"))
 
@@ -169,31 +147,30 @@ def _find_existing(out_dir: Path, split: str, h: int, w: int
     return None, None, None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  Main preprocessing logic
-# ═══════════════════════════════════════════════════════════════════════════
+def preprocess_nyu_split(split: str, h: int, w: int, out_dir: Path,
+                         tar_dir: Path, force: bool = False):
+    """Preprocess one NYU split into memory-mapped .npy files (streaming, parallel).
 
-
-def preprocess_split(split: str, h: int, w: int, out_dir: Path,
-                     tar_dir: Path | None = None, force: bool = False):
-    """Preprocess one split into memory-mapped .npy files (streaming, parallel)."""
+    Args:
+        tar_dir: Path to directory containing train-*.tar / val-*.tar files.
+                 If directory doesn't exist or has no tar files, warns and skips.
+    """
 
     # ── Count samples ─────────────────────────────────────────────────
-    if tar_dir and tar_dir.exists():
-        n_total, tar_files = _count_samples_in_tars(tar_dir, split)
-        source = "tar"
-    else:
-        n_total = _count_samples_in_hf(split)
-        tar_files = []
-        source = "hf"
+    if not tar_dir.exists():
+        log.warning(f"NYU tar directory not found: {tar_dir}. Skipping {split} split. "
+                    f"See README §3 for download instructions.")
+        return
+
+    n_total, tar_files = _count_nyu_samples(tar_dir, split)
 
     if n_total == 0:
         return
 
-    log.info(f"Split '{split}': {n_total} samples found ({source})")
+    log.info(f"Split '{split}': {n_total} samples found (tar)")
 
     # ── Check existing ────────────────────────────────────────────────
-    existing_rgb, existing_depth, existing_n = _find_existing(out_dir, split, h, w)
+    existing_rgb, existing_depth, existing_n = _find_nyu_existing(out_dir, split, h, w)
     if existing_rgb and existing_n == n_total and not force:
         log.info(f"  Already exists with {existing_n} samples. Skipping. "
                  f"(Use --force to rebuild)")
@@ -219,10 +196,7 @@ def preprocess_split(split: str, h: int, w: int, out_dir: Path,
         str(depth_path), mode="w+", dtype=np.float32, shape=(n_total, h, w))
 
     # ── Stream + parallel resize ──────────────────────────────────────
-    if source == "tar":
-        _stream_from_tars(tar_files, rgb_mmap, depth_mmap, h, w, n_total)
-    else:
-        _stream_from_hf(split, rgb_mmap, depth_mmap, h, w, n_total)
+    _stream_nyu_from_tars(tar_files, rgb_mmap, depth_mmap, h, w, n_total)
 
     # Flush to disk
     rgb_mmap.flush()
@@ -232,9 +206,9 @@ def preprocess_split(split: str, h: int, w: int, out_dir: Path,
     log.info(f"  Done: {n_total} samples, {size_gb:.2f} GB total")
 
 
-def _stream_from_tars(tar_files: list[str], rgb_mmap: np.ndarray,
-                      depth_mmap: np.ndarray, h: int, w: int, n_total: int):
-    """Stream samples from tar files with parallel resize workers."""
+def _stream_nyu_from_tars(tar_files: list[str], rgb_mmap: np.ndarray,
+                          depth_mmap: np.ndarray, h: int, w: int, n_total: int):
+    """Stream NYU samples from tar files with parallel resize workers."""
     n_workers = _MAX_WORKERS
     log.info(f"  Streaming from {len(tar_files)} tars with {n_workers} resize workers...")
 
@@ -255,7 +229,7 @@ def _stream_from_tars(tar_files: list[str], rgb_mmap: np.ndarray,
                     h5_bytes = f.read()
                     f.close()
 
-                    future = executor.submit(_resize_sample, h5_bytes, h, w)
+                    future = executor.submit(_resize_nyu_sample, h5_bytes, h, w)
                     futures[future] = idx
                     idx += 1
 
@@ -268,66 +242,20 @@ def _stream_from_tars(tar_files: list[str], rgb_mmap: np.ndarray,
         pbar.close()
 
 
-def _drain_futures(futures: dict, rgb_mmap: np.ndarray, depth_mmap: np.ndarray,
-                   pbar, wait_all: bool = False):
-    """Collect completed futures and write results to mmap."""
-    if wait_all:
-        done = list(as_completed(futures))
-    else:
-        # Wait for at least half to complete
-        done = []
-        for future in as_completed(futures):
-            done.append(future)
-            if len(done) >= len(futures) // 2:
-                break
-
-    for future in done:
-        i = futures.pop(future)
-        rgb_resized, dep_resized = future.result()
-        rgb_mmap[i] = rgb_resized
-        depth_mmap[i] = dep_resized
-        pbar.update(1)
-
-
-def _stream_from_hf(split: str, rgb_mmap: np.ndarray, depth_mmap: np.ndarray,
-                    h: int, w: int, n_total: int):
-    """Stream samples from HuggingFace with parallel resize workers."""
-    from datasets import load_dataset
-    from src.config import HF_TOKEN
-
-    hf_split = "validation" if split == "val" else split
-    log.info(f"  Streaming from HuggingFace ({hf_split}) with {_MAX_WORKERS} workers...")
-
-    ds = load_dataset(
-        "sayakpaul/nyu_depth_v2",
-        split=hf_split,
-        trust_remote_code=True,
-        token=HF_TOKEN,
-    )
-
-    n_workers = _MAX_WORKERS
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        batch_size = n_workers * 4
-        futures = {}
-        pbar = tqdm(total=n_total, desc="  Processing", unit="img")
-
-        for i, row in enumerate(ds):
-            rgb_np = np.array(row["image"].convert("RGB"))
-            depth_np = np.array(row["depth_map"])
-
-            future = executor.submit(_resize_sample_from_pil, rgb_np, depth_np, h, w)
-            futures[future] = i
-
-            if len(futures) >= batch_size:
-                _drain_futures(futures, rgb_mmap, depth_mmap, pbar)
-
-        _drain_futures(futures, rgb_mmap, depth_mmap, pbar, wait_all=True)
-        pbar.close()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  KITTI Preprocessing — stream from Eigen split files + depth zip
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def _get_kitti_output_dir() -> Path:
+    """Resolve output directory for KITTI mmap files."""
+    from src.config import ROOT, get_kitti_mmap_dir
+    mmap_dir = get_kitti_mmap_dir()
+    p = Path(mmap_dir)
+    if not p.is_absolute():
+        p = ROOT / p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _parse_eigen_split(split_file: Path) -> list[str]:
@@ -559,7 +487,7 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
 
     # Determine datasets (support multiple: --dataset nyu kitti)
-    datasets = ["nyu"]
+    datasets = ["nyu", "kitti"]
     if "--dataset" in sys.argv:
         ds_idx = sys.argv.index("--dataset") + 1
         datasets = []
@@ -569,7 +497,7 @@ def main():
         # Remove dataset values from positional args
         args = [a for a in args if a not in datasets]
     if not datasets:
-        datasets = ["nyu"]
+        datasets = ["nyu", "kitti"]
 
     log.info(f"Datasets: {', '.join(d.upper() for d in datasets)}")
     log.info(f"Workers: {_MAX_WORKERS}")
@@ -604,7 +532,7 @@ def main():
             else:
                 h, w = 192, 256
 
-            out_dir = _get_output_dir()
+            out_dir = _get_nyu_output_dir()
 
             log.info(f"\n{'='*50}")
             log.info(f"  NYU — {h}x{w}")
@@ -613,14 +541,12 @@ def main():
 
             # Resolve tar directory
             nyu_path = get_nyu_dataset_path()
-            tar_dir = None
-            if nyu_path:
-                tar_dir = Path(nyu_path)
-                if not tar_dir.is_absolute():
-                    tar_dir = ROOT / tar_dir
+            tar_dir = Path(nyu_path)
+            if not tar_dir.is_absolute():
+                tar_dir = ROOT / tar_dir
 
-            preprocess_split("train", h, w, out_dir, tar_dir, force=force)
-            preprocess_split("val", h, w, out_dir, tar_dir, force=force)
+            preprocess_nyu_split("train", h, w, out_dir, tar_dir, force=force)
+            preprocess_nyu_split("val", h, w, out_dir, tar_dir, force=force)
 
         else:
             log.warning(f"Unknown dataset '{ds}'. Skipping.")

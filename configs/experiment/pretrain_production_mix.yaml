@@ -8,15 +8,19 @@ compile: true
 
 data:
   use_mmap: true
-  use_cache: false
   datasets:
     nyu:
       n_samples: 22285 # 47584 full NYU training set
       depth_shift: 0.1
+      min_depth: 0.001
+      max_depth: 10.0
+      eval_crop: none
     kitti:
       n_samples: 22285 # Eigen train ~23k valid pairs
       depth_shift: 1.0
-      resolution: [192, 640] # mmap resolution for KITTI
+      min_depth: 0.001
+      max_depth: 80.0
+      eval_crop: eigen
 
 epochs: 300
 bs: 128

@@ -118,9 +118,8 @@ def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RE
         depth_batch: (N, 1, H, W) tensor, meters.
         rgb_display: list of (H, W, 3) numpy arrays in [0, 1].
     """
-    from src.config import HF_TOKEN, HF_OFFLINE, get_nyu_dataset_path
+    from src.config import get_nyu_dataset_path
     from src.data import _mmap_files_exist, _find_mmap_file
-    import os
 
     H, W = resolution
 
@@ -163,7 +162,7 @@ def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RE
         depth_batch = torch.stack(depth_tensors)
         return rgb_batch, depth_batch, rgb_display
 
-    # Fallback: load from tar/h5 or HuggingFace (NYU only)
+    # Fallback: load from tar/h5 (NYU only)
     if dataset != "nyu":
         raise FileNotFoundError(
             f"No mmap val files found for {dataset} at {H}x{W}. "
@@ -171,24 +170,8 @@ def load_val_samples(n_images: int, resolution: tuple[int, int] = DEFAULT_VIS_RE
         )
 
     nyu_path = get_nyu_dataset_path()
-    if nyu_path:
-        from src.data import _load_nyu_local
-        samples = _load_nyu_local(nyu_path, n_images, include_depth=True, split="val")
-    else:
-        from datasets import load_dataset
-        if HF_OFFLINE:
-            os.environ["HF_DATASETS_OFFLINE"] = "1"
-        else:
-            os.environ.pop("HF_DATASETS_OFFLINE", None)
-        ds = load_dataset("sayakpaul/nyu_depth_v2", split="validation",
-                          streaming=True, trust_remote_code=True, token=HF_TOKEN)
-        samples = []
-        for i, row in enumerate(ds):
-            if i >= n_images:
-                break
-            rgb_pil = row["image"].convert("RGB")
-            depth = np.array(row["depth_map"])
-            samples.append((rgb_pil, depth))
+    from src.data import _load_nyu_local
+    samples = _load_nyu_local(nyu_path, n_images, include_depth=True, split="val")
 
     # Prepare tensors
     transform = v2.Compose([

@@ -15,14 +15,13 @@ compile: false # torch.compile for faster training (requires CUDA)
 # ── Data ───────────────────────────────────────────────────────────────
 data:
   use_mmap: false # use memory-mapped .npy files (run src.preprocess first)
-  use_cache: false # use pre-processed .pt tensor cache (faster loading)
-  datasets:
-    nyu:
-      n_samples: 1000 # images to load (max ~47584 for NYU)
-      depth_shift: 0.1 # D-shift augmentation range in meters (±10cm indoor)
-      min_depth: 0.001 # min valid depth for evaluation (m)
-      max_depth: 10.0 # max valid depth for evaluation (m)
-      eval_crop: none # evaluation crop mode (none for NYU)
+  datasets: {} # declared per experiment (nyu, kitti, or both)
+  # Each dataset entry expects:
+  #   n_samples: int       — number of training images to load
+  #   depth_shift: float   — D-shift augmentation range in meters (e.g. 0.1 indoor, 1.0 outdoor)
+  #   min_depth: float     — minimum valid depth for evaluation (m)
+  #   max_depth: float     — maximum valid depth for evaluation (m)
+  #   eval_crop: str       — evaluation crop mode ("none" for NYU, "eigen" for KITTI)
 
 # ── LeJEPA Pre-training ────────────────────────────────────────────────
 epochs: 50

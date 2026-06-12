@@ -12,11 +12,25 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+from scipy.ndimage import distance_transform_edt
 
 from src.config import DEVICE
 from src.utils import (
     compute_depth_metrics, infer_variant, load_val_samples, DATASET_DEFAULTS, VIS_SEED,
 )
+
+
+def _densify_depth(depth: np.ndarray) -> np.ndarray:
+    """Fill invalid (zero) pixels with nearest valid neighbor value.
+
+    Uses distance transform to find the closest valid pixel for each
+    invalid pixel. For visualization only — does not modify training data.
+    """
+    valid = depth > 0
+    if valid.all():
+        return depth
+    _, indices = distance_transform_edt(~valid, return_distances=True, return_indices=True)
+    return depth[tuple(indices)]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -67,7 +81,8 @@ def visualize_depth_inline(model, variant: str, epoch: int,
     model.resolution = orig_resolution
 
     # Plot grid: 4 columns
-    fig, axes = plt.subplots(n_images, 4, figsize=(16, 4 * n_images))
+    fig, axes = plt.subplots(n_images, 4, figsize=(16, 2.5 * n_images))
+    fig.subplots_adjust(hspace=0.05, wspace=0.02)
     if n_images == 1:
         axes = axes[np.newaxis, :]
 
@@ -77,11 +92,12 @@ def visualize_depth_inline(model, variant: str, epoch: int,
         axes[i, 0].imshow(rgb_display[i])
         axes[i, 0].axis("off")
 
-        axes[i, 1].imshow(depth_gt_np[i], cmap="plasma",
+        gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
+        axes[i, 1].imshow(gt_vis, cmap="plasma_r",
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 1].axis("off")
 
-        axes[i, 2].imshow(depth_pred_np[i], cmap="plasma",
+        axes[i, 2].imshow(depth_pred_np[i], cmap="plasma_r",
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 2].axis("off")
 
@@ -164,10 +180,11 @@ def visualize_depth_standalone(checkpoint: str | Path, variant: str | None = Non
     for i in range(n_images):
         axes[i, 0].imshow(rgb_display[i])
         axes[i, 0].axis("off")
-        axes[i, 1].imshow(depth_gt_np[i], cmap="plasma",
+        gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
+        axes[i, 1].imshow(gt_vis, cmap="plasma_r",
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 1].axis("off")
-        axes[i, 2].imshow(depth_pred_np[i], cmap="plasma",
+        axes[i, 2].imshow(depth_pred_np[i], cmap="plasma_r",
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 2].axis("off")
         diff = np.abs(depth_gt_np[i] - depth_pred_np[i])

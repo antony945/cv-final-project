@@ -60,9 +60,7 @@ Edit `.env` and set:
 
 | Variable | Description |
 |----------|-------------|
-| `HF_TOKEN` | HuggingFace token (optional, avoids rate limits) |
-| `HF_OFFLINE` | `true` to use local cache only, `false` to stream from HF |
-| `NYU_DATASET_PATH` | Path to local NYU tar archives (e.g. `datasets/nyu`). If set, loads from local `.tar/.h5` files instead of HuggingFace. Relative paths resolve from project root. |
+| `NYU_DATASET_PATH` | Path to local NYU tar archives (default: `datasets/nyu`). Relative paths resolve from project root. |
 | `NYU_MMAP_DIR` | Path to preprocessed NYU memory-mapped `.npy` files (default: `datasets/nyu_mmap`). |
 | `KITTI_DATASET_PATH` | Path to KITTI raw data (Eigen split files + depth zip). Default: `datasets/kitti`. |
 | `KITTI_MMAP_DIR` | Path to preprocessed KITTI memory-mapped `.npy` files (default: `datasets/kitti_mmap`). |
@@ -77,18 +75,15 @@ KITTI_DATASET_PATH=datasets/kitti
 KITTI_MMAP_DIR=datasets/kitti_mmap
 ```
 
-On first run with HuggingFace, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
-
-Alternatively, place the NYU Depth V2 `.tar` shards (`train-000000.tar`, `train-000001.tar`, ...) in `datasets/nyu/` and set `NYU_DATASET_PATH=datasets/nyu` to skip HuggingFace entirely.
-
 ### 5. Preprocess
 
 After downloading, run the memory-mapped preprocessor to prepare the data for training:
 
 ```bash
-uv run python -m src.preprocess                    # NYU (default)
-uv run python -m src.preprocess --dataset kitti    # KITTI
-uv run python -m src.preprocess --dataset nyu kitti # both at once
+uv run python -m src.preprocess                     # both datasets (default)
+uv run python -m src.preprocess --dataset nyu       # NYU only
+uv run python -m src.preprocess --dataset kitti     # KITTI only
+uv run python -m src.preprocess --dataset nyu kitti # explicit both datasets
 ```
 
 Once preprocessing completes, you're ready to train.
@@ -154,20 +149,21 @@ The default data pipeline loads all images into RAM as full-resolution PIL objec
 ### How to preprocess
 
 ```bash
-# NYU: default 192×256 (the METER paper resolution)
+# Both datasets (default): NYU at 192×256, KITTI at 192×640
 uv run python -m src.preprocess
-uv run python -m src.preprocess --dataset nyu 192 256   # explicit
 
-# KITTI: default 192×640 (wide aspect ratio)
+# Single dataset only
+uv run python -m src.preprocess --dataset nyu
 uv run python -m src.preprocess --dataset kitti
-uv run python -m src.preprocess --dataset kitti 192 640  # explicit
 
-# Both datasets at once
-uv run python -m src.preprocess --dataset nyu kitti
+# Explicit resolution override
+uv run python -m src.preprocess --dataset nyu 192 256
+uv run python -m src.preprocess --dataset kitti 192 640
 
 # Force rebuild even if files already exist
 uv run python -m src.preprocess --force
-uv run python -m src.preprocess --dataset nyu kitti --force
+uv run python -m src.preprocess --dataset nyu --force
+uv run python -m src.preprocess --dataset kitti --force
 ```
 
 KITTI preprocessing requires:

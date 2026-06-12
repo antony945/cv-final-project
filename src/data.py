@@ -1,17 +1,16 @@
 """Dataset loading for LeJEPA pre-training (RGB multi-view) and depth fine-tuning.
 
 Supports:
-- NYU Depth V2: local tar/h5 files (set NYU_DATASET_PATH) or HuggingFace streaming
-- KITTI: placeholder (TO IMPLEMENT)
+- NYU Depth V2: local tar/h5 files (NYU_DATASET_PATH, default: datasets/nyu)
+- KITTI: memory-mapped .npy files (requires preprocessing)
 
 Storage backends (selected via config):
-- Normal: loads all data into RAM at startup (fast access, high memory)
 - Mmap: memory-mapped .npy files (near-zero RAM, requires preprocessing)
-- Cached: per-sample .pt files on disk (moderate speed, low RAM)
+- Normal: loads all data into RAM at startup (fast access, high memory — NYU only fallback)
 
 Environment variables:
 - NYU_DATASET_PATH: path to directory with train-*.tar files (each containing .h5 samples).
-                    If set, loads locally. If unset, falls back to HuggingFace streaming.
+                    Defaults to 'datasets/nyu'.
 """
 
 import abc
@@ -34,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import v2
 from omegaconf import DictConfig
 
-from src.config import HF_TOKEN, HF_OFFLINE, get_nyu_dataset_path, DEVICE
+from src.config import get_nyu_dataset_path, DEVICE
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +172,7 @@ class BaseDepthDataset(Dataset, abc.ABC):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  NYU Depth V2 — Raw data loaders (tar/h5 and HuggingFace)
+#  NYU Depth V2 — Raw data loaders (tar/h5)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -230,47 +229,6 @@ def _load_nyu_local(path: str, n_samples: int, include_depth: bool = False,
     return results
 
 
-def _load_nyu_hf(n_samples: int, include_depth: bool = False,
-                 token: str | None = HF_TOKEN, offline: bool = HF_OFFLINE,
-                 split: str = "train"):
-    """Load NYU samples from HuggingFace (streaming/cached)."""
-    from datasets import load_dataset
-
-    if offline:
-        os.environ["HF_DATASETS_OFFLINE"] = "1"
-        log.info(f"Loading {n_samples} NYU {split} samples from local cache (offline)...")
-    else:
-        os.environ.pop("HF_DATASETS_OFFLINE", None)
-        log.info(f"Loading {n_samples} NYU {split} samples from HuggingFace (streaming)...")
-
-    hf_split = "validation" if split == "val" else split
-    stream = load_dataset(
-        "sayakpaul/nyu_depth_v2",
-        split=hf_split,
-        streaming=True,
-        trust_remote_code=True,
-        token=token,
-    )
-
-    results = []
-    pbar = tqdm(total=n_samples, desc=f"  Loading NYU {hf_split} (HF)",
-                     unit="img")
-    for i, row in enumerate(stream):
-        if i >= n_samples:
-            break
-        rgb_pil = row["image"].convert("RGB")
-        if include_depth:
-            depth = np.array(row["depth_map"])  # PIL → ndarray
-            results.append((rgb_pil, depth))
-        else:
-            results.append(rgb_pil)
-        pbar.update(1)
-    pbar.close()
-
-    log.info(f"Loaded {len(results)} NYU samples from HuggingFace.")
-    return results
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  NYU — Normal (in-RAM) Datasets
 # ═══════════════════════════════════════════════════════════════════════════
@@ -279,17 +237,13 @@ def _load_nyu_hf(n_samples: int, include_depth: bool = False,
 class NYUPretrainDataset(BasePretrainDataset):
     """NYU Depth V2 — RGB images loaded into RAM with multi-view augmentation.
 
-    Loads from local tar/h5 (if NYU_DATASET_PATH set) or HuggingFace streaming.
-    All images are held in memory as PIL objects.
+    Loads from local tar/h5 files. All images are held in memory as PIL objects.
     """
 
     def __init__(self, n_samples: int, n_views: int = 4, resolution: int = 128):
         super().__init__(n_views=n_views, resolution=resolution)
         nyu_path = get_nyu_dataset_path()
-        if nyu_path:
-            self._images = _load_nyu_local(nyu_path, n_samples, include_depth=False)
-        else:
-            self._images = _load_nyu_hf(n_samples, include_depth=False)
+        self._images = _load_nyu_local(nyu_path, n_samples, include_depth=False)
         log.info(f"{len(self._images)} pretrain samples loaded (in-RAM).")
 
     def __len__(self) -> int:
@@ -312,11 +266,8 @@ class NYUDepthDataset(BaseDepthDataset):
         super().__init__(resolution=resolution, train=train, augment=augment,
                          depth_shift=depth_shift)
         nyu_path = get_nyu_dataset_path()
-        if nyu_path:
-            self._samples = _load_nyu_local(nyu_path, n_samples,
-                                            include_depth=True, split=split)
-        else:
-            self._samples = _load_nyu_hf(n_samples, include_depth=True, split=split)
+        self._samples = _load_nyu_local(nyu_path, n_samples,
+                                        include_depth=True, split=split)
         log.info(f"{len(self._samples)} depth samples loaded "
                  f"({'train' if train else 'val'}, in-RAM).")
 
@@ -420,136 +371,6 @@ class MmapNYUDepthDataset(BaseDepthDataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  NYU — Cached Datasets (per-sample .pt files on disk)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _get_cache_path(cache_dir: str | None, split: str,
-                    resolution: tuple[int, int], suffix: str = "") -> Path:
-    """Resolve cache directory path for a given split and resolution."""
-    from src.config import ROOT
-
-    if cache_dir is None:
-        cache_dir = str(ROOT / "datasets" / "nyu_cache")
-    h, w = resolution
-    return Path(cache_dir) / f"{split}_{h}x{w}{suffix}"
-
-
-class CachedNYUPretrainDataset(BasePretrainDataset):
-    """NYU Depth V2 — cached RGB .pt files for pre-training.
-
-    On first use, loads tar/h5, resizes to mmap_resolution, saves as .pt.
-    Subsequent runs load directly from cache — no tar/h5 decompression overhead.
-    """
-
-    def __init__(self, n_samples: int, n_views: int = 4, resolution: int = 128,
-                 mmap_resolution: tuple[int, int] = (192, 256),
-                 cache_dir: str | None = None):
-        super().__init__(n_views=n_views, resolution=resolution)
-        self._mmap_resolution = mmap_resolution
-        self._cache_path = _get_cache_path(cache_dir, "train",
-                                           mmap_resolution, suffix="_rgb")
-
-        if not self._cache_path.exists() or not any(self._cache_path.glob("*.pt")):
-            self._build_cache(n_samples)
-
-        all_files = sorted(self._cache_path.glob("*.pt"))
-        self._files = all_files[:n_samples] if n_samples < len(all_files) else all_files
-        log.info(f"{len(self._files)} cached pretrain samples loaded.")
-
-    def _build_cache(self, n_samples: int):
-        """One-time: load from tar/h5, resize, save as .pt (uint8 tensor)."""
-        log.info(f"Building pretrain cache at {self._cache_path} ...")
-        self._cache_path.mkdir(parents=True, exist_ok=True)
-
-        nyu_path = get_nyu_dataset_path()
-        if nyu_path:
-            images = _load_nyu_local(nyu_path, n_samples, include_depth=False)
-        else:
-            images = _load_nyu_hf(n_samples, include_depth=False)
-
-        h, w = self._mmap_resolution
-        for i, img_pil in enumerate(images):
-            img_np = np.array(img_pil).astype(np.float32) / 255.0
-            rgb = torch.from_numpy(img_np).permute(2, 0, 1)  # (3, H_orig, W_orig)
-            rgb = F.interpolate(rgb.unsqueeze(0), size=(h, w),
-                                mode="bilinear", align_corners=False).squeeze(0)
-            # Store as uint8 to save disk space
-            rgb_uint8 = (rgb.clamp(0, 1) * 255).byte()
-            torch.save(rgb_uint8, self._cache_path / f"sample_{i:06d}.pt")
-
-        log.info(f"Cache built: {len(images)} samples at {self._cache_path}")
-
-    def __len__(self) -> int:
-        return len(self._files)
-
-    def _get_image(self, idx: int) -> Image.Image:
-        rgb_uint8 = torch.load(self._files[idx], weights_only=True)  # (3, H, W) uint8
-        rgb_np = rgb_uint8.permute(1, 2, 0).numpy()  # (H, W, 3)
-        return Image.fromarray(rgb_np, mode="RGB")
-
-
-class CachedNYUDepthDataset(BaseDepthDataset):
-    """NYU Depth V2 — cached RGB+depth .pt files for fine-tuning.
-
-    On first use, loads tar/h5, resizes, saves as .pt.
-    Subsequent runs load directly from cache.
-    Each .pt contains: {"rgb": Tensor[3,H,W] float32, "depth": Tensor[1,H,W] float32}
-    """
-
-    def __init__(self, n_samples: int, resolution: tuple[int, int] | int = (192, 256),
-                 train: bool = True, augment: bool = True, split: str = "train",
-                 cache_dir: str | None = None, depth_shift: float = 0.1):
-        super().__init__(resolution=resolution, train=train, augment=augment,
-                         depth_shift=depth_shift)
-        self._cache_path = _get_cache_path(cache_dir, split, self.resolution)
-
-        if not self._cache_path.exists() or not any(self._cache_path.glob("*.pt")):
-            self._build_cache(n_samples, split)
-
-        all_files = sorted(self._cache_path.glob("*.pt"))
-        self._files = all_files[:n_samples] if n_samples < len(all_files) else all_files
-        log.info(f"{len(self._files)} cached depth samples "
-                 f"({'train' if train else 'val'}, "
-                 f"{self.resolution[0]}x{self.resolution[1]}).")
-
-    def _build_cache(self, n_samples: int, split: str):
-        """One-time: load, resize, save as .pt (float32 tensors)."""
-        log.info(f"Building depth cache at {self._cache_path} ...")
-        self._cache_path.mkdir(parents=True, exist_ok=True)
-
-        nyu_path = get_nyu_dataset_path()
-        if nyu_path:
-            samples = _load_nyu_local(nyu_path, n_samples,
-                                      include_depth=True, split=split)
-        else:
-            samples = _load_nyu_hf(n_samples, include_depth=True, split=split)
-
-        h, w = self.resolution
-        for i, (img_pil, depth_np) in enumerate(samples):
-            img_np = np.array(img_pil).astype(np.float32) / 255.0
-            rgb = torch.from_numpy(img_np).permute(2, 0, 1)
-            rgb = F.interpolate(rgb.unsqueeze(0), size=(h, w),
-                                mode="bilinear", align_corners=False).squeeze(0)
-
-            depth = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0)
-            depth = F.interpolate(depth.unsqueeze(0), size=(h, w),
-                                  mode="bilinear", align_corners=False).squeeze(0)
-
-            torch.save({"rgb": rgb, "depth": depth},
-                       self._cache_path / f"sample_{i:06d}.pt")
-
-        log.info(f"Cache built: {len(samples)} samples at {self._cache_path}")
-
-    def __len__(self) -> int:
-        return len(self._files)
-
-    def _get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        data = torch.load(self._files[idx], weights_only=True)
-        return data["rgb"], data["depth"]  # already (3,H,W) and (1,H,W) float32
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 #  KITTI — Stubs (TO IMPLEMENT)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -602,22 +423,6 @@ class MmapKITTIPretrainDataset(BasePretrainDataset):
     def _get_image(self, idx: int) -> Image.Image:
         rgb_np = np.array(self._rgb[idx])  # copy from mmap
         return Image.fromarray(rgb_np, mode="RGB")
-
-
-class CachedKITTIPretrainDataset(BasePretrainDataset):
-    """KITTI — Cached .pt RGB for pre-training. Not implemented (use mmap)."""
-
-    def __init__(self, n_samples: int, n_views: int = 4, resolution: int = 128,
-                 mmap_resolution: tuple[int, int] = (192, 640),
-                 cache_dir: str | None = None):
-        super().__init__(n_views=n_views, resolution=resolution)
-        raise NotImplementedError("KITTI cached pretrain not implemented. Use mmap mode.")
-
-    def __len__(self) -> int:
-        return 0
-
-    def _get_image(self, idx: int) -> Image.Image:
-        raise NotImplementedError
 
 
 class KITTIDepthDataset(BaseDepthDataset):
@@ -681,22 +486,6 @@ class MmapKITTIDepthDataset(BaseDepthDataset):
         depth = torch.from_numpy(depth_np.copy()).unsqueeze(0)
         return rgb, depth
 
-
-class CachedKITTIDepthDataset(BaseDepthDataset):
-    """KITTI — Cached .pt RGB + depth for fine-tuning. Not implemented (use mmap)."""
-
-    def __init__(self, n_samples: int, resolution: tuple[int, int] | int = (192, 640),
-                 train: bool = True, augment: bool = True, split: str = "train",
-                 cache_dir: str | None = None, depth_shift: float = 1.0):
-        super().__init__(resolution=resolution, train=train, augment=augment,
-                         depth_shift=depth_shift)
-        raise NotImplementedError("KITTI cached depth not implemented. Use mmap mode.")
-
-    def __len__(self) -> int:
-        return 0
-
-    def _get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -767,9 +556,8 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
 
     Iterates all datasets in cfg.data.datasets and wraps them in ConcatDataset
     for mixed pre-training. Dataset selection priority per dataset:
-    1. Memory-mapped .npy (if use_mmap=true and RGB file exists)
-    2. Cached .pt (if use_cache=true)
-    3. Load from tar/h5 into RAM (default)
+    1. Memory-mapped .npy (if use_mmap=true — errors if files missing)
+    2. Load from tar/h5 into RAM (if use_mmap=false — NYU only)
 
     Args:
         cfg: Hydra DictConfig (needs cfg.data.datasets dict, cfg.n_views,
@@ -781,8 +569,6 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
     resolution = cfg.resolution
 
     use_mmap = cfg.data.get("use_mmap", False)
-    use_cache = cfg.data.get("use_cache", False)
-    mmap_resolution = tuple(cfg.get("finetune", {}).get("resolution", [192, 256]))
 
     datasets_cfg = cfg.data.datasets
     dataset_list = []
@@ -791,32 +577,38 @@ def get_pretrain_loader(cfg: DictConfig, device: str | None = None) -> DataLoade
         n_samples = ds_cfg.get("n_samples", 1000)
 
         if ds_name == "nyu":
-            nyu_mmap_res = tuple(cfg.get("finetune", {}).get("resolution", [192, 256]))
-            if use_mmap and _mmap_rgb_exists(nyu_mmap_res, "train", dataset="nyu"):
+            # TODO: Now it will search for fixed res mmap files
+            mmap_res = (192, 256)
+            if use_mmap:
+                if not _mmap_rgb_exists(mmap_res, "train", dataset="nyu"):
+                    raise FileNotFoundError(
+                        f"data.use_mmap=true but NYU mmap RGB file not found for "
+                        f"{mmap_res[0]}x{mmap_res[1]}. "
+                        f"Run 'uv run python -m src.preprocess' or set "
+                        f"data.use_mmap=false. See README §5 for details."
+                    )
                 ds = MmapNYUPretrainDataset(
                     n_samples=n_samples, n_views=n_views,
-                    resolution=resolution, mmap_resolution=nyu_mmap_res)
-            elif use_cache:
-                cache_dir = cfg.data.get("cache_dir", None)
-                ds = CachedNYUPretrainDataset(
-                    n_samples=n_samples, n_views=n_views,
-                    resolution=resolution, mmap_resolution=nyu_mmap_res,
-                    cache_dir=cache_dir)
+                    resolution=resolution, mmap_resolution=mmap_res)
             else:
                 ds = NYUPretrainDataset(
                     n_samples=n_samples, n_views=n_views, resolution=resolution)
             dataset_list.append(ds)
 
         elif ds_name == "kitti":
-            kitti_mmap_res = tuple(ds_cfg.get("resolution", [192, 640]))
-            if use_mmap and _mmap_rgb_exists(kitti_mmap_res, "train", dataset="kitti"):
+            # TODO: Now it will search for fixed res mmap files
+            mmap_res = (192, 640)
+            if use_mmap:
+                if not _mmap_rgb_exists(mmap_res, "train", dataset="kitti"):
+                    raise FileNotFoundError(
+                        f"data.use_mmap=true but KITTI mmap RGB file not found for "
+                        f"{mmap_res[0]}x{mmap_res[1]}. "
+                        f"Run 'uv run python -m src.preprocess --dataset kitti' or set "
+                        f"data.use_mmap=false. See README §5 for details."
+                    )
                 ds = MmapKITTIPretrainDataset(
                     n_samples=n_samples, n_views=n_views,
-                    resolution=resolution, mmap_resolution=kitti_mmap_res)
-            elif use_cache:
-                ds = CachedKITTIPretrainDataset(
-                    n_samples=n_samples, n_views=n_views,
-                    resolution=resolution, mmap_resolution=kitti_mmap_res)
+                    resolution=resolution, mmap_resolution=mmap_res)
             else:
                 ds = KITTIPretrainDataset(
                     n_samples=n_samples, n_views=n_views, resolution=resolution)
@@ -852,9 +644,8 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
 
     Uses the first (and typically only) dataset in cfg.data.datasets for
     fine-tuning. Dataset selection priority:
-    1. Memory-mapped .npy (if use_mmap=true and files exist)
-    2. Cached .pt (if use_cache=true)
-    3. Load from tar/h5 into RAM (default)
+    1. Memory-mapped .npy (if use_mmap=true — errors if files missing)
+    2. Load from tar/h5 into RAM (if use_mmap=false — NYU only)
 
     Args:
         cfg: Hydra DictConfig (needs cfg.data.datasets dict,
@@ -877,6 +668,7 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
         n_samples = 999_999
 
     # Resolution: prefer finetune.resolution, fallback to cfg.resolution
+    # TODO: Fix this inconsistency in the future
     resolution = cfg.get("finetune", {}).get("resolution", cfg.get("resolution", 128))
     if isinstance(resolution, (list, tuple)):
         resolution = tuple(resolution)
@@ -885,41 +677,42 @@ def get_depth_loader(cfg: DictConfig, device: str | None = None,
     is_train = (split == "train")
 
     use_mmap = cfg.data.get("use_mmap", False)
-    use_cache = cfg.data.get("use_cache", False)
 
     if dataset_name == "nyu":
-        if use_mmap and _mmap_files_exist(resolution, split, dataset="nyu"):
+        if use_mmap:
+            if not _mmap_files_exist(resolution, split, dataset="nyu"):
+                raise FileNotFoundError(
+                    f"data.use_mmap=true but NYU mmap files not found for "
+                    f"{split} {resolution[0]}x{resolution[1]}. "
+                    f"Run 'uv run python -m src.preprocess' or set "
+                    f"data.use_mmap=false. See README §5 for details."
+                )
             ds = MmapNYUDepthDataset(
                 n_samples=n_samples, resolution=resolution,
                 train=is_train, augment=is_train, split=split,
                 depth_shift=depth_shift)
-        elif use_cache:
-            cache_dir = cfg.data.get("cache_dir", None)
-            ds = CachedNYUDepthDataset(
-                n_samples=n_samples, resolution=resolution,
-                train=is_train, augment=is_train, split=split,
-                cache_dir=cache_dir, depth_shift=depth_shift)
         else:
             ds = NYUDepthDataset(
                 n_samples=n_samples, resolution=resolution,
                 train=is_train, augment=is_train, split=split,
                 depth_shift=depth_shift)
     elif dataset_name == "kitti":
-        # KITTI uses its own resolution if specified
-        kitti_resolution = tuple(ds_cfg.get("resolution", [192, 640]))
-        if use_mmap and _mmap_files_exist(kitti_resolution, split, dataset="kitti"):
+        # KITTI uses finetune.resolution (same pattern as NYU)
+        if use_mmap:
+            if not _mmap_files_exist(resolution, split, dataset="kitti"):
+                raise FileNotFoundError(
+                    f"data.use_mmap=true but KITTI mmap files not found for "
+                    f"{split} {resolution[0]}x{resolution[1]}. "
+                    f"Run 'uv run python -m src.preprocess --dataset kitti' or set "
+                    f"data.use_mmap=false. See README §5 for details."
+                )
             ds = MmapKITTIDepthDataset(
-                n_samples=n_samples, resolution=kitti_resolution,
-                train=is_train, augment=is_train, split=split,
-                depth_shift=depth_shift)
-        elif use_cache:
-            ds = CachedKITTIDepthDataset(
-                n_samples=n_samples, resolution=kitti_resolution,
+                n_samples=n_samples, resolution=resolution,
                 train=is_train, augment=is_train, split=split,
                 depth_shift=depth_shift)
         else:
             ds = KITTIDepthDataset(
-                n_samples=n_samples, resolution=kitti_resolution,
+                n_samples=n_samples, resolution=resolution,
                 train=is_train, augment=is_train, split=split,
                 depth_shift=depth_shift)
     else:

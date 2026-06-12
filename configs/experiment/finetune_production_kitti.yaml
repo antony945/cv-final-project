@@ -29,7 +29,7 @@ finetune:
   lamb3: 1.0
   depth_bias: 10.0 # outdoor scenes have larger average depth
   freeze_encoder_epochs: 0
-  pretrained_encoder: models\lejepa_xxs_mix_300_44k_128.pth # set to checkpoint path for transfer
+  pretrained_encoder: null # set to checkpoint path for transfer
 
 ckpt_every: 5
 use_wandb: true

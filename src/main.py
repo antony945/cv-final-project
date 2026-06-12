@@ -15,8 +15,6 @@ import os
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-# Pin HF cache to absolute path before hydra changes cwd
-os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 
 
 @hydra.main(config_path="../configs", config_name="config", version_base=None)
