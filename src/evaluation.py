@@ -92,7 +92,10 @@ def visualize_depth_inline(model, variant: str, epoch: int,
         axes[i, 0].imshow(rgb_display[i])
         axes[i, 0].axis("off")
 
-        gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
+        # TODO: for KITTI, visualize GT depth with nearest-neighbor filling to avoid large black invalid regions
+        # For now dont do it, but need to fix
+        # gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
+        gt_vis = depth_gt_np[i]
         axes[i, 1].imshow(gt_vis, cmap="plasma_r",
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 1].axis("off")
@@ -180,7 +183,10 @@ def visualize_depth_standalone(checkpoint: str | Path, variant: str | None = Non
     for i in range(n_images):
         axes[i, 0].imshow(rgb_display[i])
         axes[i, 0].axis("off")
-        gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
+        # TODO: for KITTI, visualize GT depth with nearest-neighbor filling to avoid large black invalid regions
+        # For now dont do it, but need to fix
+        # gt_vis = _densify_depth(depth_gt_np[i]) if dataset == "kitti" else depth_gt_np[i]
+        gt_vis = depth_gt_np[i]
         axes[i, 1].imshow(gt_vis, cmap="plasma_r",
                           vmin=depth_vmin, vmax=depth_vmax)
         axes[i, 1].axis("off")
