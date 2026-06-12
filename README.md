@@ -23,7 +23,34 @@ uv sync
 
 This installs PyTorch with CUDA 12.4 support, Hydra, and all other dependencies.
 
-### 3. Configure environment
+### 3. Download datasets
+
+#### NYU Depth V2
+
+1. Go to [sayakpaul/nyu_depth_v2](https://huggingface.co/datasets/sayakpaul/nyu_depth_v2/tree/main/data) on HuggingFace
+2. Download all `.tar` files (`train-000000.tar`, `train-000001.tar`, ..., `validation-000000.tar`)
+3. Place them in `datasets/nyu/` (or any directory you prefer)
+
+#### KITTI (Eigen Split)
+
+1. Go to [kitti-split-and-eigen-split](https://www.kaggle.com/datasets/qikangdeng/kitti-split-and-eigen-split) on Kaggle
+2. Download:
+   - `eigen_train_files.txt` (2.9 MiB) — training file list
+   - `eigen_test_files.txt` (91 KiB) — test file list
+   - `eigen_train_files/` folder, downloaded as `.zip` (6.1 GiB) — RGB images for training
+   - `eigen_test_files/` folder, downloaded as `.zip` (190 MiB) — RGB images for validation
+3. Place/extract everything into `datasets/kitti/` (or your preferred directory)
+4. Go to [KITTI Depth Prediction Benchmark](https://www.cvlibs.net/datasets/kitti/eval_depth.php?benchmark=depth_prediction)
+5. Download **"Annotated depth maps data set"** (`data_depth_annotated.zip`, 13.3 GiB) — ground-truth depth maps
+6. Extract into the same `datasets/kitti/` directory
+
+After downloading, your `datasets/kitti/` should contain:
+
+![KITTI directory structure](docs/images/kitti_directory_organization.jpeg)
+
+> **Note**: Do not rename any downloaded files. The preprocessing script searches for files by their exact original names (e.g. `eigen_train_files.txt`, `data_depth_annotated.zip`, `train-000000.tar`, etc.).
+
+### 4. Configure environment
 
 ```bash
 cp .env.example .env
@@ -40,34 +67,7 @@ Edit `.env` and set:
 | `KITTI_DATASET_PATH` | Path to KITTI raw data (Eigen split files + depth zip). Default: `datasets/kitti`. |
 | `KITTI_MMAP_DIR` | Path to preprocessed KITTI memory-mapped `.npy` files (default: `datasets/kitti_mmap`). |
 
-On first run with HuggingFace, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
-
-Alternatively, place the NYU Depth V2 `.tar` shards (`train-000000.tar`, `train-000001.tar`, ...) in `datasets/nyu/` and set `NYU_DATASET_PATH=datasets/nyu` to skip HuggingFace entirely.
-
-### 4. Download datasets
-
-#### NYU Depth V2
-
-1. Go to [sayakpaul/nyu_depth_v2](https://huggingface.co/datasets/sayakpaul/nyu_depth_v2/tree/main/data) on HuggingFace
-2. Download all `.tar` files (`train-000000.tar`, `train-000001.tar`, ..., `validation-000000.tar`)
-3. Place them in `datasets/nyu/` (or any directory you prefer)
-
-#### KITTI (Eigen Split)
-
-1. Go to [kitti-split-and-eigen-split](https://www.kaggle.com/datasets/qikangdeng/kitti-split-and-eigen-split) on Kaggle
-2. Download:
-   - `eigen_train_files.txt` — training file list
-   - `eigen_test_files.txt` — test file list
-   - `eigen_train_files/` folder (downloaded as `.zip`)
-   - `eigen_test_files/` folder (downloaded as `.zip`)
-3. Place/extract everything into `datasets/kitti/` (or your preferred directory)
-4. Go to [KITTI Depth Prediction Benchmark](https://www.cvlibs.net/datasets/kitti/eval_depth.php?benchmark=depth_prediction)
-5. Download **"Annotated depth maps data set"** (14 GB) — this contains the ground-truth depth maps
-6. Extract into the same `datasets/kitti/` directory
-
-#### Set environment variables
-
-In your `.env` file, point to where you placed the data:
+Example dataset paths:
 
 ```env
 NYU_DATASET_PATH=datasets/nyu
@@ -77,7 +77,11 @@ KITTI_DATASET_PATH=datasets/kitti
 KITTI_MMAP_DIR=datasets/kitti_mmap
 ```
 
-#### Preprocess
+On first run with HuggingFace, set `HF_OFFLINE=false` so the dataset gets cached. After that, set it to `true` for offline operation.
+
+Alternatively, place the NYU Depth V2 `.tar` shards (`train-000000.tar`, `train-000001.tar`, ...) in `datasets/nyu/` and set `NYU_DATASET_PATH=datasets/nyu` to skip HuggingFace entirely.
+
+### 5. Preprocess
 
 After downloading, run the memory-mapped preprocessor to prepare the data for training:
 
@@ -89,7 +93,7 @@ uv run python -m src.preprocess --dataset nyu kitti # both at once
 
 Once preprocessing completes, you're ready to train.
 
-#### Pre-train (LeJEPA self-supervised)
+### 6. Pre-train (LeJEPA self-supervised)
 
 Train the encoder on unlabeled RGB images using the LeJEPA/SIGReg objective:
 
@@ -99,7 +103,7 @@ uv run python -m src.main +experiment=pretrain_production
 
 This saves the encoder backbone to `outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth`.
 
-#### Visualize pre-trained features (optional)
+### 7. Visualize pre-trained features (optional)
 
 Check that the encoder learned useful geometry by running PCA visualization:
 
@@ -107,7 +111,7 @@ Check that the encoder learned useful geometry by running PCA visualization:
 uv run python -m src.pca_visualization --checkpoint outputs/pretrain/xxs_.../checkpoints/lejepa_xxs_final.pth --dataset nyu kitti
 ```
 
-#### Fine-tune (Depth Estimation)
+### 8. Fine-tune (Depth Estimation)
 
 Train the full model (encoder + decoder) for monocular depth prediction, initializing from the pre-trained encoder:
 
@@ -118,7 +122,7 @@ uv run python -m src.main +experiment=finetune_production_nyu \
 
 This saves the depth model to `outputs/finetune/xxs_.../checkpoints/meter_xxs_final.pth`.
 
-#### Evaluate
+### 9. Evaluate
 
 Run full validation and visualize depth predictions:
 
