@@ -33,13 +33,13 @@ class SeparableConv2d(nn.Module):
 
 def conv_1x1_bn(inp, oup):
     return nn.Sequential(nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
-                         nn.BatchNorm2d(oup), nn.ReLU())
+                         nn.BatchNorm2d(oup), nn.ReLU(inplace=True))
 
 
 def conv_nxn_bn(inp, oup, kernel_size=3, stride=1):
     return nn.Sequential(
         SeparableConv2d(inp, oup, kernel_size, stride=stride, bias=False),
-        nn.BatchNorm2d(oup), nn.ReLU())
+        nn.BatchNorm2d(oup), nn.ReLU(inplace=True))
 
 
 class PreNorm(nn.Module):
@@ -56,7 +56,7 @@ class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(dim, hidden_dim), nn.ReLU(inplace=True), nn.Dropout(dropout),
             nn.Linear(hidden_dim, dim), nn.Dropout(dropout))
 
     def forward(self, x):
@@ -119,16 +119,16 @@ class MV2Block(nn.Module):
             self.conv = nn.Sequential(
                 nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1,
                           groups=hidden_dim, bias=False),
-                nn.BatchNorm2d(hidden_dim), nn.ReLU(),
+                nn.BatchNorm2d(hidden_dim), nn.ReLU(inplace=True),
                 nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
                 nn.BatchNorm2d(oup))
         else:
             self.conv = nn.Sequential(
                 nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False),
-                nn.BatchNorm2d(hidden_dim), nn.ReLU(),
+                nn.BatchNorm2d(hidden_dim), nn.ReLU(inplace=True),
                 nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1,
                           groups=hidden_dim, bias=False),
-                nn.BatchNorm2d(hidden_dim), nn.ReLU(),
+                nn.BatchNorm2d(hidden_dim), nn.ReLU(inplace=True),
                 nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
                 nn.BatchNorm2d(oup))
 
@@ -153,7 +153,7 @@ class MobileViTBlock(nn.Module):
         self.conv4 = conv_nxn_bn(2 * channel, channel, kernel_size)
 
     def forward(self, x):
-        y = x.clone()
+        y = x
         x = self.conv2(self.conv1(x))
         _, _, h, w = x.shape
         x = rearrange(x, "b d (h ph) (w pw) -> b (ph pw) (h w) d",
@@ -276,7 +276,7 @@ class UpSampleBlock(nn.Module):
             output_padding=1, bias=False)
         self.end_up_layer = nn.Sequential(
             SeparableConv2d(sep_conv_filters, oup, kernel_size=3),
-            nn.ReLU())
+            nn.ReLU(inplace=True))
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.conv2d_transpose(x)

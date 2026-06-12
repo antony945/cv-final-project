@@ -143,7 +143,9 @@ def visualize_depth_standalone(checkpoint: str | Path, variant: str | None = Non
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
     if "model_state_dict" in state:
         state = state["model_state_dict"]
-    model.load_state_dict(state)
+    # Clean compile prefix if present
+    cleaned_state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+    model.load_state_dict(cleaned_state)
     model.eval()
     print(f"Loaded METER model: {ckpt_path.name} ({variant})")
 
@@ -282,7 +284,9 @@ def evaluate_full(checkpoint: str | Path, variant: str | None = None,
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
     if "model_state_dict" in state:
         state = state["model_state_dict"]
-    model.load_state_dict(state)
+    # Clean compile prefix if present
+    cleaned_state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+    model.load_state_dict(cleaned_state)
     model.eval()
 
     # Build a minimal config for get_depth_loader
@@ -331,7 +335,14 @@ def main():
                         help="Skip full validation set evaluation (only evaluate on --n-images samples).")
     parser.add_argument("--seed", type=int, default=VIS_SEED,
                         help=f"Random seed for image selection (default: {VIS_SEED})")
+    parser.add_argument("--no-show", action="store_true", default=False,
+                        help="Skip interactive matplotlib plt.show() display")
     args = parser.parse_args()
+
+    # Detect headless environments
+    import os
+    if "DISPLAY" not in os.environ:
+        args.no_show = True
 
     print("=" * 60)
     print("  METER Depth Evaluation")
@@ -382,14 +393,15 @@ def main():
         print(f"    {p}")
     print("=" * 60)
 
-    # Show images interactively
-    for p in out_paths:
-        img = plt.imread(str(p))
-        plt.figure(figsize=(16, 4 * args.n_images))
-        plt.imshow(img)
-        plt.axis("off")
-        plt.tight_layout()
-    plt.show()
+    if not args.no_show:
+        # Show images interactively
+        for p in out_paths:
+            img = plt.imread(str(p))
+            plt.figure(figsize=(16, 4 * args.n_images))
+            plt.imshow(img)
+            plt.axis("off")
+            plt.tight_layout()
+        plt.show()
 
 
 if __name__ == "__main__":

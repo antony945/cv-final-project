@@ -28,7 +28,7 @@ def run_verify(variant: str = "xxs", resolution: int = 128,
     # ── 1. Dataset check ──────────────────────────────────────────────
     print("\n[1/3] Loading dataset and showing samples...")
     verify_cfg = OmegaConf.create({
-        "data": {"dataset": "nyu", "n_samples": 50},
+        "data": {"datasets": {"nyu": {"n_samples": 50}}},
         "n_views": n_views,
         "resolution": resolution,
         "bs": 4,

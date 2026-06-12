@@ -28,7 +28,7 @@ from src.config import DEVICE as _AUTO_DEVICE, EMB_DIM
 from src.model import METERLeJEPA
 from src.utils import SIGReg, compute_lejepa_loss
 from src.data import get_pretrain_loader
-from src.pca_visualization import visualize_pca_inline
+from src.visualize import visualize_pca_inline
 
 
 def _setup_torch_performance(device: str):
