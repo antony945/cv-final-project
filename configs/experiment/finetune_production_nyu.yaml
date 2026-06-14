@@ -1,6 +1,6 @@
 # @package _global_
 # Full METER fine-tuning on NYU Depth V2
-# Usage: uv run python -m src.main +experiment=finetune_production
+# Usage: uv run python -m src.main +experiment=finetune_production_nyu
 
 task: finetune
 variant: xxs

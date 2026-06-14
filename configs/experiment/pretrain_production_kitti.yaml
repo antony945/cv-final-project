@@ -1,6 +1,6 @@
 # @package _global_
 # Full production run — ~2h on A100
-# Usage: uv run python -m src.main +experiment=pretrain_production
+# Usage: uv run python -m src.main +experiment=pretrain_production_kitti
 
 task: pretrain
 variant: xxs
@@ -9,12 +9,12 @@ compile: true
 data:
   use_mmap: true
   datasets:
-    nyu:
-      n_samples: 10000 # 47584 full NYU Depth V2 train set
-      depth_shift: 0.1
+    kitti:
+      n_samples: 22285 # Eigen train ~23k valid pairs
+      depth_shift: 1.0
       min_depth: 0.001
-      max_depth: 10.0
-      eval_crop: none
+      max_depth: 80.0
+      eval_crop: eigen
 
 epochs: 300 # paper doesnt suggest number of epochs, but minimal example use up to 800
 bs: 128 # suggested by original paper, can go also to 256

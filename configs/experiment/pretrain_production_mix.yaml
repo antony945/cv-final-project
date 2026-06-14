@@ -1,6 +1,6 @@
 # @package _global_
 # Mixed pre-training on NYU + KITTI RGB (ConcatDataset)
-# Usage: uv run python -m src.main +experiment=pretrain_mixed
+# Usage: uv run python -m src.main +experiment=pretrain_production_mix
 
 task: pretrain
 variant: xxs
