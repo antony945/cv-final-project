@@ -1,6 +1,6 @@
 # @package _global_
 # Full METER fine-tuning on KITTI (Eigen split)
-# Usage: uv run python -m src.main +experiment=finetune_production_kitti
+# Usage: uv run python -m src.main +experiment=finetune_production_kitti_lejepa
 
 task: finetune
 variant: xxs
@@ -29,7 +29,7 @@ finetune:
   lamb3: 1.0
   depth_bias: 10.0 # outdoor scenes have larger average depth
   freeze_encoder_epochs: 0
-  pretrained_encoder: models\lejepa_xxs_mix_300_44k_128.pth # set to checkpoint path for transfer
+  pretrained_encoder: models/lejepa_xxs_300_22k_kitti_128.pth # set to checkpoint path for transfer
 
 ckpt_every: 5
 use_wandb: true
